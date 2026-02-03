@@ -67,21 +67,28 @@ const buildCandidate = ({ contact, location, source }) => {
 const scoreCandidate = (candidate, searchData) => {
     let score = 0;
 
-    if (searchData.phone && candidate.contactPhone) {
-        const normalizedSearchPhone = normalizePhone(searchData.phone);
-        const normalizedCandidatePhone = normalizePhone(candidate.contactPhone);
-        if (normalizedSearchPhone === normalizedCandidatePhone) {
-            score += 40;
-        } else if (
-            normalizedSearchPhone.slice(-7) &&
+    const normalizedSearchPhone = normalizePhone(searchData.phone);
+    const normalizedCandidatePhone = normalizePhone(candidate.contactPhone);
+    const phoneExact = Boolean(
+        normalizedSearchPhone &&
+            normalizedCandidatePhone &&
+            normalizedSearchPhone === normalizedCandidatePhone
+    );
+    const phonePartial = Boolean(
+        normalizedSearchPhone.slice(-7) &&
+            normalizedCandidatePhone.slice(-7) &&
             normalizedSearchPhone.slice(-7) === normalizedCandidatePhone.slice(-7)
-        ) {
-            score += 20;
-        }
+    );
+
+    if (phoneExact) {
+        score += 40;
+    } else if (phonePartial) {
+        score += 20;
     }
 
+    let nameSimilarity = 0;
     if (searchData.name && candidate.contactName) {
-        const nameSimilarity = fuzzySimilarity(searchData.name, candidate.contactName);
+        nameSimilarity = fuzzySimilarity(searchData.name, candidate.contactName);
         if (normalizeText(searchData.name) === normalizeText(candidate.contactName)) {
             score += 30;
         } else if (nameSimilarity > config.matchingThresholds.fuzzySimilarity) {
@@ -89,18 +96,20 @@ const scoreCandidate = (candidate, searchData) => {
         }
     }
 
+    let addressSimilarityScore = 0;
     if (searchData.address && candidate.address) {
         const candidateAddress = `${candidate.address.street || ''} ${candidate.address.city || ''} ${candidate.address.state || ''} ${candidate.address.postalCode || ''}`.trim();
-        const addrSimilarity = addressSimilarity(searchData.address, candidateAddress);
-        if (addrSimilarity === 1) {
+        addressSimilarityScore = addressSimilarity(searchData.address, candidateAddress);
+        if (addressSimilarityScore === 1) {
             score += 30;
-        } else if (addrSimilarity > config.matchingThresholds.fuzzySimilarity) {
+        } else if (addressSimilarityScore > config.matchingThresholds.fuzzySimilarity) {
             score += 15;
         }
     }
 
+    let locationSimilarity = 0;
     if (searchData.locationName && candidate.locationName) {
-        const locationSimilarity = fuzzySimilarity(searchData.locationName, candidate.locationName);
+        locationSimilarity = fuzzySimilarity(searchData.locationName, candidate.locationName);
         if (normalizeText(searchData.locationName) === normalizeText(candidate.locationName)) {
             score += 20;
         } else if (locationSimilarity > config.matchingThresholds.fuzzySimilarity) {
@@ -112,7 +121,14 @@ const scoreCandidate = (candidate, searchData) => {
         score = 100;
     }
 
-    return score;
+    return {
+        confidence: score,
+        phoneExact,
+        phonePartial,
+        addressSimilarity: addressSimilarityScore,
+        locationSimilarity,
+        nameSimilarity
+    };
 };
 
 const searchByPhone = async (authToken, phone) => {
@@ -215,10 +231,21 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
 
     const scoredCandidates = Array.from(deduped.values()).map((candidate) => ({
         ...candidate,
-        confidence: scoreCandidate(candidate, searchData)
+        ...scoreCandidate(candidate, searchData)
     }));
 
-    scoredCandidates.sort((a, b) => b.confidence - a.confidence);
+    scoredCandidates.sort((a, b) => {
+        const addressSort = (b.addressSimilarity || 0) - (a.addressSimilarity || 0);
+        if (addressSort !== 0) return addressSort;
+
+        const locationSort = (b.locationSimilarity || 0) - (a.locationSimilarity || 0);
+        if (locationSort !== 0) return locationSort;
+
+        const phoneSort = (b.phoneExact ? 1 : 0) - (a.phoneExact ? 1 : 0);
+        if (phoneSort !== 0) return phoneSort;
+
+        return b.confidence - a.confidence;
+    });
     return scoredCandidates;
 };
 

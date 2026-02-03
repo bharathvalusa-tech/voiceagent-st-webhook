@@ -137,13 +137,37 @@ class ServiceTradeService {
 
             const { data } = await response.json();
             const locations = Array.isArray(data?.locations) ? data.locations : [];
-            const normalizedQuery = addressQuery.toLowerCase().replace(/[^\w\s]/g, '');
+
+            const normalizeAddressText = (text) => {
+                const lower = (text || '').toLowerCase();
+                return lower
+                    .replace(/[^a-z0-9\s]/g, ' ')
+                    .replace(/\bst\b/g, 'street')
+                    .replace(/\bste\b/g, 'suite')
+                    .replace(/\bave\b/g, 'avenue')
+                    .replace(/\brd\b/g, 'road')
+                    .replace(/\bdr\b/g, 'drive')
+                    .replace(/\bblvd\b/g, 'boulevard')
+                    .replace(/\bct\b/g, 'court')
+                    .replace(/\bln\b/g, 'lane')
+                    .replace(/\bpkwy\b/g, 'parkway')
+                    .replace(/\bter\b/g, 'terrace')
+                    .replace(/\bapt\b/g, 'apartment')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            };
+
+            const normalizedQuery = normalizeAddressText(addressQuery);
 
             return locations.filter((location) => {
                 if (!location?.address) return false;
-                const fullAddress = `${location.address.street} ${location.address.city} ${location.address.state} ${location.address.postalCode}`.toLowerCase();
-                const normalizedAddress = fullAddress.replace(/[^\w\s]/g, '');
-                return normalizedAddress.includes(normalizedQuery) || normalizedQuery.includes(location.address.street?.toLowerCase());
+                const fullAddress = `${location.address.street} ${location.address.city} ${location.address.state} ${location.address.postalCode}`;
+                const normalizedAddress = normalizeAddressText(fullAddress);
+                const normalizedStreet = normalizeAddressText(location.address.street || '');
+                return (
+                    normalizedAddress.includes(normalizedQuery) ||
+                    normalizedQuery.includes(normalizedStreet)
+                );
             });
         } catch (error) {
             console.error('Error searching locations by address from ServiceTrade:', error);

@@ -132,11 +132,20 @@ router.post('/retell', async (req, res) => {
 
         const authToken = tokenData[0].auth_token;
 
+        const validatedFullAddress = [
+            validatedAddress.street,
+            validatedAddress.city,
+            validatedAddress.state,
+            validatedAddress.postalCode
+        ]
+            .filter(Boolean)
+            .join(', ');
+
         const searchData = {
             phone: callerPhone,
             name: callerName,
             locationName,
-            address: validatedAddress.formatted_address || validatedAddress.street
+            address: validatedFullAddress || validatedAddress.formatted_address || validatedAddress.street
         };
 
         const candidates = await findCustomerWithConfidence(authToken, searchData);
