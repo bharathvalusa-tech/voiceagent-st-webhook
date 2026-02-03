@@ -117,6 +117,13 @@ const scoreCandidate = (candidate, searchData) => {
         }
     }
 
+    if (
+        phoneExact &&
+        addressSimilarityScore >= config.matchingThresholds.fuzzySimilarity
+    ) {
+        score = 100;
+    }
+
     if (score > 100) {
         score = 100;
     }
