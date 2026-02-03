@@ -20,12 +20,17 @@ const extractPayload = (body) => {
     return { eventType, call, analysis, extracted };
 };
 
-const getCallField = (call, extracted, fallbackKeys = []) => {
-    for (const key of fallbackKeys) {
-        if (call?.[key]) return call[key];
-        if (extracted?.[key]) return extracted[key];
+const logWithContext = (level, message, context = {}) => {
+    const payload = {
+        level,
+        message,
+        ...context
+    };
+    if (level === 'error') {
+        console.error(JSON.stringify(payload));
+    } else {
+        console.log(JSON.stringify(payload));
     }
-    return null;
 };
 
 router.post('/retell', async (req, res) => {
@@ -37,12 +42,16 @@ router.post('/retell', async (req, res) => {
         }
 
         const agentId = call?.agent_id || extracted?.agent_id || req.body?.agent_id;
+        const callId = call?.call_id || call?.id || req.body?.call_id || extracted?.call_id;
         if (!agentId) {
-            console.log('❌ Missing agent_id in webhook payload');
-            return res.status(200).json({ status: 'error', message: 'Missing agent_id' });
+            logWithContext('error', 'Missing agent_id in webhook payload', { callId });
+            return res.status(200).json({
+                status: 'error',
+                reason: 'missing_agent_id',
+                message: 'Missing agent_id'
+            });
         }
 
-        const callId = call?.call_id || call?.id || req.body?.call_id || extracted?.call_id;
         const callerPhone =
             call?.from_number ||
             call?.fromNumber ||
@@ -109,8 +118,17 @@ router.post('/retell', async (req, res) => {
             'Service request from call';
 
         if (!rawAddress) {
-            console.log('❌ Missing address for validation', { callId, agentId });
-            return res.status(200).json({ status: 'pending_review', message: 'Missing address' });
+            logWithContext('error', 'Missing address for validation', {
+                callId,
+                agentId,
+                callerPhone,
+                callerName
+            });
+            return res.status(200).json({
+                status: 'pending_review',
+                reason: 'missing_address',
+                message: 'Missing address'
+            });
         }
 
         const validatedAddress = await validateAddress({
@@ -120,14 +138,31 @@ router.post('/retell', async (req, res) => {
             postalCode: addressPostal
         });
         if (!validatedAddress) {
-            console.log('❌ Address validation failed', { callId, agentId, rawAddress });
-            return res.status(200).json({ status: 'pending_review', message: 'Invalid address' });
+            logWithContext('error', 'Address validation failed', {
+                callId,
+                agentId,
+                callerPhone,
+                callerName,
+                rawAddress
+            });
+            return res.status(200).json({
+                status: 'pending_review',
+                reason: 'invalid_address',
+                message: 'Invalid address'
+            });
         }
 
         const tokenData = await supabaseService.getServiceTradeToken(agentId);
         if (!tokenData || tokenData.length === 0) {
-            console.log('❌ No ServiceTrade token found', { agentId, callId });
-            return res.status(200).json({ status: 'error', message: 'No ServiceTrade token found' });
+            logWithContext('error', 'No ServiceTrade token found', {
+                callId,
+                agentId
+            });
+            return res.status(200).json({
+                status: 'error',
+                reason: 'missing_servicetrade_token',
+                message: 'No ServiceTrade token found'
+            });
         }
 
         const authToken = tokenData[0].auth_token;
@@ -152,16 +187,26 @@ router.post('/retell', async (req, res) => {
         const bestMatch = candidates[0];
 
         if (!bestMatch || bestMatch.confidence < config.matchingThresholds.confidence || !bestMatch.locationId) {
-            console.log('❌ Low confidence match - manual review needed:', {
+            logWithContext('error', 'Low confidence match - manual review needed', {
                 callId,
                 agentId,
                 callerPhone,
                 callerName,
                 address: validatedAddress.formatted_address,
                 bestMatch,
-                candidatesCount: candidates.length
+                candidatesCount: candidates.length,
+                confidenceThreshold: config.matchingThresholds.confidence
             });
-            return res.status(200).json({ status: 'pending_review', message: 'Low confidence match' });
+            return res.status(200).json({
+                status: 'pending_review',
+                reason: 'low_confidence_match',
+                message: 'Low confidence match',
+                details: {
+                    bestMatch,
+                    candidatesCount: candidates.length,
+                    confidenceThreshold: config.matchingThresholds.confidence
+                }
+            });
         }
 
         const jobResult = await createJob(
@@ -174,6 +219,14 @@ router.post('/retell', async (req, res) => {
             agentId
         );
 
+        logWithContext('info', 'Job created successfully', {
+            callId,
+            agentId,
+            locationId: bestMatch.locationId,
+            confidence: bestMatch.confidence,
+            jobId: jobResult?.jobId
+        });
+
         return res.status(200).json({
             status: 'success',
             job: jobResult,
@@ -183,8 +236,15 @@ router.post('/retell', async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('❌ Error handling Retell webhook:', error);
-        return res.status(200).json({ status: 'error', message: error.message || 'Webhook error' });
+        logWithContext('error', 'Error handling Retell webhook', {
+            error: error.message,
+            stack: error.stack
+        });
+        return res.status(200).json({
+            status: 'error',
+            reason: 'internal_error',
+            message: error.message || 'Webhook error'
+        });
     }
 });
 
