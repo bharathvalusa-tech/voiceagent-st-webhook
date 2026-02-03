@@ -18,8 +18,10 @@ const extractPayload = (body) => {
         analysis.extracted_data ||
         analysis.call_analyzed_data ||
         analysis;
+    // collected_dynamic_variables contains data from custom functions during the call
+    const dynamicVars = body.collected_dynamic_variables || call?.collected_dynamic_variables || {};
 
-    return { eventType, call, analysis, extracted };
+    return { eventType, call, analysis, extracted, dynamicVars };
 };
 
 const logWithContext = (level, message, context = {}) => {
@@ -51,7 +53,7 @@ const buildJobDescription = (issueDescription, callerName) => {
 
 router.post('/retell', async (req, res) => {
     try {
-        const { eventType, call, analysis, extracted } = extractPayload(req.body || {});
+        const { eventType, call, analysis, extracted, dynamicVars } = extractPayload(req.body || {});
 
         if (eventType && eventType !== 'call_analyzed') {
             return res.status(200).json({ status: 'ignored', message: 'Event not call_analyzed' });
@@ -68,7 +70,7 @@ router.post('/retell', async (req, res) => {
             });
         }
 
-        const loadExtractedFields = (sourceExtracted, sourceAnalysis) => {
+        const loadExtractedFields = (sourceExtracted, sourceAnalysis, sourceDynamicVars) => {
             const callerPhoneFromCall =
                 call?.from_number ||
                 call?.fromNumber ||
@@ -145,6 +147,46 @@ router.post('/retell', async (req, res) => {
                 sourceExtracted?.call_summary ||
                 'Service request from call';
 
+            // Extract technician ID(s) from collected_dynamic_variables (custom functions)
+            // Look for patterns like tech1_id, tech2_id, tech_id, etc.
+            let techIds = [];
+            if (sourceDynamicVars && typeof sourceDynamicVars === 'object') {
+                const techIdKeys = Object.keys(sourceDynamicVars).filter(
+                    (key) => /^tech\d*_id$/i.test(key) || /^technician\d*_id$/i.test(key)
+                );
+                techIdKeys.forEach((key) => {
+                    const parsed = Number(sourceDynamicVars[key]);
+                    if (!Number.isNaN(parsed) && !techIds.includes(parsed)) {
+                        techIds.push(parsed);
+                    }
+                });
+            }
+
+            // Fallback to extracted data if no tech IDs from dynamic vars
+            if (techIds.length === 0) {
+                const rawTechId =
+                    sourceExtracted?.tech_id ||
+                    sourceExtracted?.techId ||
+                    sourceExtracted?.technician_id ||
+                    sourceExtracted?.technicianId ||
+                    null;
+                const rawTechIds =
+                    sourceExtracted?.tech_ids ||
+                    sourceExtracted?.techIds ||
+                    sourceExtracted?.technician_ids ||
+                    sourceExtracted?.technicianIds ||
+                    null;
+
+                if (rawTechIds && Array.isArray(rawTechIds)) {
+                    techIds = rawTechIds.map((id) => Number(id)).filter((id) => !Number.isNaN(id));
+                } else if (rawTechId) {
+                    const parsed = Number(rawTechId);
+                    if (!Number.isNaN(parsed)) {
+                        techIds = [parsed];
+                    }
+                }
+            }
+
             return {
                 callerPhone,
                 callerPhoneFallback: callerPhoneFromExtracted,
@@ -156,13 +198,15 @@ router.post('/retell', async (req, res) => {
                 rawAddress,
                 locationName,
                 companyName,
-                issueDescription
+                issueDescription,
+                techIds
             };
         };
 
         let resolvedExtracted = extracted || {};
         let resolvedAnalysis = analysis || {};
-        let extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis);
+        let resolvedDynamicVars = dynamicVars || {};
+        let extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis, resolvedDynamicVars);
 
         const needsRetellFetch =
             !extractedFields.callerPhone ||
@@ -199,11 +243,15 @@ router.post('/retell', async (req, res) => {
 
                 resolvedAnalysis = fallbackAnalysis;
                 resolvedExtracted = { ...fallbackExtracted, ...resolvedExtracted };
-                extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis);
+                // Also get collected_dynamic_variables from Retell API (contains custom function data like tech IDs)
+                const fallbackDynamicVars = callDetails?.collected_dynamic_variables || {};
+                resolvedDynamicVars = { ...fallbackDynamicVars, ...resolvedDynamicVars };
+                extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis, resolvedDynamicVars);
 
                 logWithContext('info', 'Loaded extracted fields via Retell API fallback', {
                     callId,
-                    agentId
+                    agentId,
+                    hasDynamicVars: Object.keys(resolvedDynamicVars).length > 0
                 });
             } catch (error) {
                 logWithContext('error', 'Retell API fallback failed', {
@@ -225,8 +273,18 @@ router.post('/retell', async (req, res) => {
             rawAddress,
             locationName,
             companyName,
-            issueDescription
+            issueDescription,
+            techIds
         } = extractedFields;
+
+        if (techIds.length > 0) {
+            logWithContext('info', 'Extracted technician IDs from call', {
+                callId,
+                agentId,
+                techIds,
+                source: Object.keys(resolvedDynamicVars).length > 0 ? 'collected_dynamic_variables' : 'extracted_data'
+            });
+        }
 
         if (!rawAddress) {
             logWithContext('error', 'Missing address for validation', {
@@ -365,7 +423,8 @@ router.post('/retell', async (req, res) => {
                 locationId: bestMatch.locationId,
                 description: jobDescription,
                 callerPhoneNumber: matchedPhone,
-                call_id: callId
+                call_id: callId,
+                techIds: techIds
             },
             agentId
         );
@@ -375,7 +434,8 @@ router.post('/retell', async (req, res) => {
             agentId,
             locationId: bestMatch.locationId,
             confidence: bestMatch.confidence,
-            jobId: jobResult?.jobId
+            jobId: jobResult?.jobId,
+            techIds: techIds.length > 0 ? techIds : null
         });
 
         return res.status(200).json({
