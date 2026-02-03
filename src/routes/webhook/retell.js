@@ -34,6 +34,20 @@ const logWithContext = (level, message, context = {}) => {
     }
 };
 
+const buildJobDescription = (issueDescription, callerName) => {
+    const name = (callerName || '').trim() || 'Unknown person';
+    const rawDescription = (issueDescription || '').trim();
+    if (!rawDescription) {
+        return `[AFTER HOURS]: ${name} reported an issue.`;
+    }
+
+    const replaced = callerName
+        ? rawDescription.replace(/\b(caller|customer)\b/gi, name)
+        : rawDescription;
+
+    return `[AFTER HOURS]: ${name} reported ${replaced}`;
+};
+
 router.post('/retell', async (req, res) => {
     try {
         const { eventType, call, analysis, extracted } = extractPayload(req.body || {});
@@ -300,10 +314,12 @@ router.post('/retell', async (req, res) => {
             });
         }
 
+        const jobDescription = buildJobDescription(issueDescription, callerName);
+
         const jobResult = await createJob(
             {
                 locationId: bestMatch.locationId,
-                description: issueDescription,
+                description: jobDescription,
                 callerPhoneNumber: callerPhone,
                 call_id: callId
             },
