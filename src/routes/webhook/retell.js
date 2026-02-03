@@ -1,5 +1,6 @@
 const config = require('../../config/environment');
 const express = require('express');
+const retellService = require('../../services/retellService');
 const { validateAddress, buildAddressQuery } = require('../../services/googleMapsService');
 const { findCustomerWithConfidence } = require('../../services/customerMatchingService');
 const { createJob } = require('../../controllers/serviceTradeController');
@@ -52,70 +53,150 @@ router.post('/retell', async (req, res) => {
             });
         }
 
-        const callerPhone =
-            call?.from_number ||
-            call?.fromNumber ||
-            call?.phone_number ||
-            extracted?.caller_phone ||
-            extracted?.phone ||
-            null;
+        const loadExtractedFields = (sourceExtracted, sourceAnalysis) => {
+            const callerPhone =
+                call?.from_number ||
+                call?.fromNumber ||
+                call?.phone_number ||
+                sourceExtracted?.caller_phone ||
+                sourceExtracted?.phone ||
+                null;
 
-        const callerName =
-            extracted?.caller_name ||
-            extracted?.customer_name ||
-            extracted?.name ||
-            null;
+            const callerName =
+                sourceExtracted?.caller_name ||
+                sourceExtracted?.customer_name ||
+                sourceExtracted?.name ||
+                null;
 
-        const addressLine1 =
-            extracted?.address_line1 ||
-            extracted?.addressLine1 ||
-            extracted?.street_address ||
-            extracted?.street ||
-            extracted?.address1 ||
-            null;
+            const addressLine1 =
+                sourceExtracted?.address_line1 ||
+                sourceExtracted?.addressLine1 ||
+                sourceExtracted?.street_address ||
+                sourceExtracted?.street ||
+                sourceExtracted?.address1 ||
+                null;
 
-        const addressCity =
-            extracted?.city ||
-            extracted?.address_city ||
-            extracted?.addressCity ||
-            null;
+            const addressCity =
+                sourceExtracted?.city ||
+                sourceExtracted?.address_city ||
+                sourceExtracted?.addressCity ||
+                null;
 
-        const addressState =
-            extracted?.state ||
-            extracted?.address_state ||
-            extracted?.addressState ||
-            null;
+            const addressState =
+                sourceExtracted?.state ||
+                sourceExtracted?.address_state ||
+                sourceExtracted?.addressState ||
+                null;
 
-        const addressPostal =
-            extracted?.postal_code ||
-            extracted?.postalCode ||
-            extracted?.zip ||
-            null;
+            const addressPostal =
+                sourceExtracted?.postal_code ||
+                sourceExtracted?.postalCode ||
+                sourceExtracted?.zip ||
+                null;
 
-        const rawAddress =
-            extracted?.caller_address ||
-            extracted?.address ||
-            extracted?.location_address ||
-            extracted?.raw_input ||
-            buildAddressQuery({
-                line1: addressLine1,
-                city: addressCity,
-                state: addressState,
-                postalCode: addressPostal
-            }) ||
-            null;
+            const rawAddress =
+                sourceExtracted?.caller_address ||
+                sourceExtracted?.address ||
+                sourceExtracted?.location_address ||
+                sourceExtracted?.raw_input ||
+                buildAddressQuery({
+                    line1: addressLine1,
+                    city: addressCity,
+                    state: addressState,
+                    postalCode: addressPostal
+                }) ||
+                null;
 
-        const locationName =
-            extracted?.location_name ||
-            extracted?.business_name ||
-            extracted?.location ||
-            null;
+            const locationName =
+                sourceExtracted?.location_name ||
+                sourceExtracted?.business_name ||
+                sourceExtracted?.location ||
+                null;
 
-        const issueDescription =
-            extracted?.issue_description ||
-            analysis?.call_summary ||
-            extracted?.call_summary ||
-            'Service request from call';
+            const issueDescription =
+                sourceExtracted?.issue_description ||
+                sourceAnalysis?.call_summary ||
+                sourceExtracted?.call_summary ||
+                'Service request from call';
+
+            return {
+                callerPhone,
+                callerName,
+                addressLine1,
+                addressCity,
+                addressState,
+                addressPostal,
+                rawAddress,
+                locationName,
+                issueDescription
+            };
+        };
+
+        let resolvedExtracted = extracted || {};
+        let resolvedAnalysis = analysis || {};
+        let extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis);
+
+        const needsRetellFetch =
+            !extractedFields.callerPhone ||
+            !extractedFields.callerName ||
+            !extractedFields.rawAddress;
+
+        if (needsRetellFetch && callId) {
+            try {
+                const callDetails = await retellService.getCall(callId);
+                const fallbackAnalysis = callDetails?.call_analysis || {};
+                let fallbackExtracted =
+                    fallbackAnalysis.custom_analysis_data ||
+                    fallbackAnalysis.extracted_data ||
+                    fallbackAnalysis.call_analyzed_data ||
+                    fallbackAnalysis ||
+                    {};
+
+                if (typeof fallbackExtracted === 'string') {
+                    try {
+                        fallbackExtracted = JSON.parse(fallbackExtracted);
+                    } catch (parseError) {
+                        // keep as string if parsing fails
+                    }
+                }
+
+                if (fallbackExtracted && typeof fallbackExtracted === 'object' && fallbackExtracted['caller data']) {
+                    try {
+                        const parsed = JSON.parse(fallbackExtracted['caller data']);
+                        fallbackExtracted = { ...fallbackExtracted, ...parsed };
+                    } catch (parseError) {
+                        // ignore parse errors for custom blob
+                    }
+                }
+
+                resolvedAnalysis = fallbackAnalysis;
+                resolvedExtracted = { ...fallbackExtracted, ...resolvedExtracted };
+                extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis);
+
+                logWithContext('info', 'Loaded extracted fields via Retell API fallback', {
+                    callId,
+                    agentId
+                });
+            } catch (error) {
+                logWithContext('error', 'Retell API fallback failed', {
+                    callId,
+                    agentId,
+                    error: error.message
+                });
+            }
+        }
+
+        const {
+            callerPhone,
+            callerName,
+            addressLine1,
+            addressCity,
+            addressState,
+            addressPostal,
+            rawAddress,
+            locationName,
+            issueDescription
+        } = extractedFields;
 
         if (!rawAddress) {
             logWithContext('error', 'Missing address for validation', {
