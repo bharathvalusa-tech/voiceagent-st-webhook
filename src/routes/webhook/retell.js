@@ -1,3 +1,4 @@
+// @ts-nocheck
 const config = require('../../config/environment');
 const express = require('express');
 const retellService = require('../../services/retellService');
@@ -68,13 +69,16 @@ router.post('/retell', async (req, res) => {
         }
 
         const loadExtractedFields = (sourceExtracted, sourceAnalysis) => {
-            const callerPhone =
+            const callerPhoneFromCall =
                 call?.from_number ||
                 call?.fromNumber ||
                 call?.phone_number ||
+                null;
+            const callerPhoneFromExtracted =
                 sourceExtracted?.caller_phone ||
                 sourceExtracted?.phone ||
                 null;
+            const callerPhone = callerPhoneFromCall || callerPhoneFromExtracted || null;
 
             const callerName =
                 sourceExtracted?.caller_name ||
@@ -126,6 +130,14 @@ router.post('/retell', async (req, res) => {
                 sourceExtracted?.business_name ||
                 sourceExtracted?.location ||
                 null;
+            const companyName =
+                sourceExtracted?.company_name ||
+                sourceExtracted?.company ||
+                (sourceExtracted?.business_name &&
+                sourceExtracted?.business_name !== locationName
+                    ? sourceExtracted?.business_name
+                    : null) ||
+                null;
 
             const issueDescription =
                 sourceExtracted?.issue_description ||
@@ -135,6 +147,7 @@ router.post('/retell', async (req, res) => {
 
             return {
                 callerPhone,
+                callerPhoneFallback: callerPhoneFromExtracted,
                 callerName,
                 addressLine1,
                 addressCity,
@@ -142,6 +155,7 @@ router.post('/retell', async (req, res) => {
                 addressPostal,
                 rawAddress,
                 locationName,
+                companyName,
                 issueDescription
             };
         };
@@ -203,12 +217,14 @@ router.post('/retell', async (req, res) => {
         const {
             callerPhone,
             callerName,
+            callerPhoneFallback,
             addressLine1,
             addressCity,
             addressState,
             addressPostal,
             rawAddress,
             locationName,
+            companyName,
             issueDescription
         } = extractedFields;
 
@@ -271,21 +287,47 @@ router.post('/retell', async (req, res) => {
             .filter(Boolean)
             .join(', ');
 
-        const searchData = {
-            phone: callerPhone,
-            name: callerName,
-            locationName,
-            address: validatedFullAddress || validatedAddress.formatted_address || validatedAddress.street
+        const buildSearchData = (phone) => {
+            return {
+                phone,
+                name: callerName,
+                locationName,
+                companyName,
+                address: validatedFullAddress || validatedAddress.formatted_address || validatedAddress.street
+            };
         };
 
-        const candidates = await findCustomerWithConfidence(authToken, searchData);
-        const bestMatch = candidates[0];
+        let matchedPhone = callerPhone;
+        let candidates = await findCustomerWithConfidence(authToken, buildSearchData(callerPhone));
+        let bestMatch = candidates[0];
+
+        const shouldTryFallbackPhone =
+            callerPhoneFallback &&
+            callerPhoneFallback !== callerPhone &&
+            (!bestMatch || bestMatch.confidence < config.matchingThresholds.confidence);
+
+        if (shouldTryFallbackPhone) {
+            const fallbackCandidates = await findCustomerWithConfidence(
+                authToken,
+                buildSearchData(callerPhoneFallback)
+            );
+            const fallbackBestMatch = fallbackCandidates[0];
+            if (
+                fallbackBestMatch &&
+                fallbackBestMatch.confidence >= config.matchingThresholds.confidence &&
+                fallbackBestMatch.locationId
+            ) {
+                candidates = fallbackCandidates;
+                bestMatch = fallbackBestMatch;
+                matchedPhone = callerPhoneFallback;
+            }
+        }
 
         if (!bestMatch || bestMatch.confidence < config.matchingThresholds.confidence || !bestMatch.locationId) {
             logWithContext('error', 'Low confidence match - manual review needed', {
                 callId,
                 agentId,
-                callerPhone,
+                callerPhone: matchedPhone,
                 callerName,
                 address: validatedAddress.formatted_address,
                 candidatesCount: candidates.length,
@@ -296,7 +338,9 @@ router.post('/retell', async (req, res) => {
                           confidence: bestMatch.confidence,
                           phoneExact: bestMatch.phoneExact,
                           addressSimilarity: bestMatch.addressSimilarity,
-                          locationSimilarity: bestMatch.locationSimilarity
+                          locationSimilarity: bestMatch.locationSimilarity,
+                          companySimilarity: bestMatch.companySimilarity,
+                          nameSimilarity: bestMatch.nameSimilarity
                       }
                     : null,
                 bestMatch,
@@ -320,7 +364,7 @@ router.post('/retell', async (req, res) => {
             {
                 locationId: bestMatch.locationId,
                 description: jobDescription,
-                callerPhoneNumber: callerPhone,
+                callerPhoneNumber: matchedPhone,
                 call_id: callId
             },
             agentId

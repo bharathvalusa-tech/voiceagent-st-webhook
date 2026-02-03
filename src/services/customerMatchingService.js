@@ -64,6 +64,7 @@ const buildCandidate = ({ contact, location, source }) => {
         contactEmail: contact?.email || '',
         locationId: location?.id || null,
         locationName: location?.name || '',
+        companyName: location?.company?.name || '',
         address: location?.address || null
     };
 };
@@ -78,26 +79,8 @@ const scoreCandidate = (candidate, searchData) => {
             normalizedCandidatePhone &&
             normalizedSearchPhone === normalizedCandidatePhone
     );
-    const phonePartial = Boolean(
-        normalizedSearchPhone.slice(-7) &&
-            normalizedCandidatePhone.slice(-7) &&
-            normalizedSearchPhone.slice(-7) === normalizedCandidatePhone.slice(-7)
-    );
-
     if (phoneExact) {
         score += 40;
-    } else if (phonePartial) {
-        score += 20;
-    }
-
-    let nameSimilarity = 0;
-    if (searchData.name && candidate.contactName) {
-        nameSimilarity = fuzzySimilarity(searchData.name, candidate.contactName);
-        if (normalizeText(searchData.name) === normalizeText(candidate.contactName)) {
-            score += 30;
-        } else if (nameSimilarity > config.matchingThresholds.fuzzySimilarity) {
-            score += 15;
-        }
     }
 
     let addressSimilarityScore = 0;
@@ -115,9 +98,29 @@ const scoreCandidate = (candidate, searchData) => {
     if (searchData.locationName && candidate.locationName) {
         locationSimilarity = fuzzySimilarity(searchData.locationName, candidate.locationName);
         if (normalizeText(searchData.locationName) === normalizeText(candidate.locationName)) {
-            score += 20;
+            score += 30;
         } else if (locationSimilarity > config.matchingThresholds.fuzzySimilarity) {
-            score += 10;
+            score += 15;
+        }
+    }
+
+    let companySimilarity = 0;
+    if (searchData.companyName && candidate.companyName) {
+        companySimilarity = fuzzySimilarity(searchData.companyName, candidate.companyName);
+        if (normalizeText(searchData.companyName) === normalizeText(candidate.companyName)) {
+            score += 30;
+        } else if (companySimilarity > config.matchingThresholds.fuzzySimilarity) {
+            score += 15;
+        }
+    }
+
+    let nameSimilarity = 0;
+    if (searchData.name && candidate.contactName) {
+        nameSimilarity = fuzzySimilarity(searchData.name, candidate.contactName);
+        if (normalizeText(searchData.name) === normalizeText(candidate.contactName)) {
+            score += 20;
+        } else if (nameSimilarity > config.matchingThresholds.nameSimilarity) {
+            score += 15;
         }
     }
 
@@ -135,9 +138,9 @@ const scoreCandidate = (candidate, searchData) => {
     return {
         confidence: score,
         phoneExact,
-        phonePartial,
         addressSimilarity: addressSimilarityScore,
         locationSimilarity,
+        companySimilarity,
         nameSimilarity
     };
 };
@@ -246,6 +249,28 @@ const searchByAddress = async (authToken, address) => {
     return locations.map((location) => buildCandidate({ contact: location.primaryContact || null, location, source: 'address' }));
 };
 
+const searchByCompanyName = async (authToken, companyName) => {
+    const companies = await serviceTradeService.searchCompaniesByName(authToken, companyName);
+    const companyIds = companies.map((company) => company.id).filter(Boolean);
+    logMatchEvent('company_name_search_companies', {
+        companyName,
+        companyIds,
+        companiesCount: companies.length
+    });
+    if (companyIds.length === 0) return [];
+
+    const locations = await serviceTradeService.searchLocationsByCompanyIds(authToken, companyIds);
+    logMatchEvent('company_name_search_locations', {
+        companyName,
+        companyIds,
+        locationsCount: locations.length,
+        locationIds: locations.map((location) => location.id)
+    });
+    return locations.map((location) =>
+        buildCandidate({ contact: location.primaryContact || null, location, source: 'company_name' })
+    );
+};
+
 const findCustomerWithConfidence = async (authToken, searchData) => {
     const tasks = [];
     const taskLabels = [];
@@ -265,6 +290,10 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
     if (searchData.address) {
         tasks.push(searchByAddress(authToken, searchData.address));
         taskLabels.push('address');
+    }
+    if (searchData.companyName) {
+        tasks.push(searchByCompanyName(authToken, searchData.companyName));
+        taskLabels.push('company_name');
     }
 
     const results = await Promise.all(tasks);
@@ -290,6 +319,12 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         const locationSort = (b.locationSimilarity || 0) - (a.locationSimilarity || 0);
         if (locationSort !== 0) return locationSort;
 
+        const companySort = (b.companySimilarity || 0) - (a.companySimilarity || 0);
+        if (companySort !== 0) return companySort;
+
+        const nameSort = (b.nameSimilarity || 0) - (a.nameSimilarity || 0);
+        if (nameSort !== 0) return nameSort;
+
         const phoneSort = (b.phoneExact ? 1 : 0) - (a.phoneExact ? 1 : 0);
         if (phoneSort !== 0) return phoneSort;
 
@@ -303,7 +338,9 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         confidence: candidate.confidence,
         phoneExact: candidate.phoneExact,
         addressSimilarity: candidate.addressSimilarity,
-        locationSimilarity: candidate.locationSimilarity
+        locationSimilarity: candidate.locationSimilarity,
+        companySimilarity: candidate.companySimilarity,
+        nameSimilarity: candidate.nameSimilarity
     }));
 
     logMatchEvent('matching_summary', {

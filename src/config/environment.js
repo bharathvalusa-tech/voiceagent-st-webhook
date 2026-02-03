@@ -16,7 +16,8 @@ const config = {
     serviceTradeVendorId: process.env.SERVICETRADE_VENDOR_ID || '2319651446605697',
     matchingThresholds: {
         confidence: parseNumber(process.env.MATCH_CONFIDENCE_THRESHOLD, 80),
-        fuzzySimilarity: parseNumber(process.env.FUZZY_SIMILARITY_THRESHOLD, 0.8)
+        fuzzySimilarity: parseNumber(process.env.FUZZY_SIMILARITY_THRESHOLD, 0.8),
+        nameSimilarity: parseNumber(process.env.NAME_SIMILARITY_THRESHOLD, 0.6)
     }
 };
 

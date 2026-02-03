@@ -117,6 +117,65 @@ class ServiceTradeService {
         }
     }
 
+    async searchCompaniesByName(authToken, nameQuery) {
+        try {
+            const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+            const response = await fetch(
+                `${this.baseUrl}/company?name=${encodeURIComponent(nameQuery)}`,
+                {
+                    method: "GET",
+                    headers: {
+                        "Cookie": cookieValue,
+                        "Content-Type": "application/json"
+                    }
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+            }
+
+            const { data } = await response.json();
+            return Array.isArray(data?.companies) ? data.companies : [];
+        } catch (error) {
+            console.error('Error searching companies by name from ServiceTrade:', error);
+            throw error;
+        }
+    }
+
+    async searchLocationsByCompanyIds(authToken, companyIds) {
+        try {
+            const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+            const response = await fetch(
+                `${this.baseUrl}/location?status=active&limit=1000`,
+                {
+                    method: "GET",
+                    headers: {
+                        "Cookie": cookieValue,
+                        "Content-Type": "application/json"
+                    }
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+            }
+
+            const { data } = await response.json();
+            const locations = Array.isArray(data?.locations) ? data.locations : [];
+            const companyIdSet = new Set(companyIds.map((id) => String(id)));
+
+            return locations.filter((location) => {
+                const locationCompanyId = location?.company?.id;
+                if (!locationCompanyId) return false;
+                return companyIdSet.has(String(locationCompanyId));
+            });
+        } catch (error) {
+            console.error('Error searching locations by company ids from ServiceTrade:', error);
+            throw error;
+        }
+    }
+
     async searchLocationsByAddress(authToken, addressQuery) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
