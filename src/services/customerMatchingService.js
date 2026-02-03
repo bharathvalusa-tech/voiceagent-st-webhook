@@ -51,6 +51,10 @@ const addressSimilarity = (a, b) => {
     return fuzzySimilarity(aNorm, bNorm);
 };
 
+const logMatchEvent = (message, context = {}) => {
+    console.log(JSON.stringify({ level: 'info', message, ...context }));
+};
+
 const buildCandidate = ({ contact, location, source }) => {
     return {
         source,
@@ -143,6 +147,11 @@ const searchByPhone = async (authToken, phone) => {
     const normalizedSearch = normalizePhone(phone);
     const candidates = [];
 
+    logMatchEvent('phone_search_contacts_fetched', {
+        phone,
+        contactsCount: contacts.length
+    });
+
     contacts.forEach((contact) => {
         const phones = [contact.phone, contact.mobile, contact.alternatePhone].filter(Boolean);
         const hasMatch = phones.some((p) => normalizePhone(p) === normalizedSearch);
@@ -156,9 +165,15 @@ const searchByPhone = async (authToken, phone) => {
     });
 
     if (candidates.length > 0) {
+        logMatchEvent('phone_search_contact_matches', {
+            phone,
+            candidateLocations: candidates.length,
+            locationIds: candidates.map((candidate) => candidate.locationId).filter(Boolean)
+        });
         return candidates;
     }
 
+    logMatchEvent('phone_search_contact_not_found', { phone });
     const locations = await serviceTradeService.getLocations(authToken);
     const locationMatches = locations.filter((location) => {
         const primaryPhone = normalizePhone(location?.primaryContact?.phone || '');
@@ -176,12 +191,23 @@ const searchByPhone = async (authToken, phone) => {
         );
     });
 
+    logMatchEvent('phone_search_location_matches', {
+        phone,
+        locationMatches: locationMatches.length,
+        locationIds: locationMatches.map((location) => location.id)
+    });
+
     return candidates;
 };
 
 const searchByName = async (authToken, name) => {
     const contacts = await serviceTradeService.searchContacts(authToken, name);
     const candidates = [];
+
+    logMatchEvent('name_search_contacts_fetched', {
+        name,
+        contactsCount: contacts.length
+    });
 
     contacts.forEach((contact) => {
         if (Array.isArray(contact.locations) && contact.locations.length > 0) {
@@ -191,16 +217,32 @@ const searchByName = async (authToken, name) => {
         }
     });
 
+    logMatchEvent('name_search_candidates', {
+        name,
+        candidateLocations: candidates.length,
+        locationIds: candidates.map((candidate) => candidate.locationId).filter(Boolean)
+    });
+
     return candidates;
 };
 
 const searchByLocationName = async (authToken, locationName) => {
     const locations = await serviceTradeService.searchLocationsByName(authToken, locationName);
+    logMatchEvent('location_name_search_results', {
+        locationName,
+        locationsCount: locations.length,
+        locationIds: locations.map((location) => location.id)
+    });
     return locations.map((location) => buildCandidate({ contact: location.primaryContact || null, location, source: 'location_name' }));
 };
 
 const searchByAddress = async (authToken, address) => {
     const locations = await serviceTradeService.searchLocationsByAddress(authToken, address);
+    logMatchEvent('address_search_results', {
+        address,
+        locationsCount: locations.length,
+        locationIds: locations.map((location) => location.id)
+    });
     return locations.map((location) => buildCandidate({ contact: location.primaryContact || null, location, source: 'address' }));
 };
 
@@ -252,6 +294,22 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         if (phoneSort !== 0) return phoneSort;
 
         return b.confidence - a.confidence;
+    });
+
+    const topCandidates = scoredCandidates.slice(0, 3).map((candidate) => ({
+        locationId: candidate.locationId,
+        locationName: candidate.locationName,
+        contactName: candidate.contactName,
+        confidence: candidate.confidence,
+        phoneExact: candidate.phoneExact,
+        addressSimilarity: candidate.addressSimilarity,
+        locationSimilarity: candidate.locationSimilarity
+    }));
+
+    logMatchEvent('matching_summary', {
+        searchData,
+        candidateCount: scoredCandidates.length,
+        topCandidates
     });
     return scoredCandidates;
 };

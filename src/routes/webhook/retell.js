@@ -274,8 +274,18 @@ router.post('/retell', async (req, res) => {
                 callerPhone,
                 callerName,
                 address: validatedAddress.formatted_address,
-                bestMatch,
                 candidatesCount: candidates.length,
+                topCandidate: bestMatch
+                    ? {
+                          locationId: bestMatch.locationId,
+                          locationName: bestMatch.locationName,
+                          confidence: bestMatch.confidence,
+                          phoneExact: bestMatch.phoneExact,
+                          addressSimilarity: bestMatch.addressSimilarity,
+                          locationSimilarity: bestMatch.locationSimilarity
+                      }
+                    : null,
+                bestMatch,
                 confidenceThreshold: config.matchingThresholds.confidence
             });
             return res.status(200).json({
