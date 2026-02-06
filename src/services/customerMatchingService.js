@@ -258,28 +258,12 @@ const searchByPhone = async (authToken, phone) => {
         return candidates;
     }
 
-    logMatchEvent('phone_search_contact_not_found', { phone });
-    const locations = await serviceTradeService.getLocations(authToken);
-    const locationMatches = locations.filter((location) => {
-        const primaryPhone = normalizePhone(location?.primaryContact?.phone || '');
-        const locationPhone = normalizePhone(location?.phoneNumber || '');
-        return primaryPhone === normalizedSearch || locationPhone === normalizedSearch;
-    });
-
-    locationMatches.forEach((location) => {
-        candidates.push(
-            buildCandidate({
-                contact: location.primaryContact || null,
-                location,
-                source: 'phone'
-            })
-        );
-    });
-
-    logMatchEvent('phone_search_location_matches', {
+    // Phone not found in contacts - rely on other search methods (location name, company, address)
+    // Removed slow getLocations() fallback for performance (was taking 2-3 minutes)
+    // Customers always provide location/company name or address, so other searches will find it
+    logMatchEvent('phone_search_contact_not_found_no_fallback', { 
         phone,
-        locationMatches: locationMatches.length,
-        locationIds: locationMatches.map((location) => location.id)
+        reason: 'Relying on location/company/address searches for better performance'
     });
 
     return candidates;
