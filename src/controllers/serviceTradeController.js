@@ -51,17 +51,34 @@ const formatOffset = (minutesOffset) => {
     return `${sign}${hours}:${minutes}`;
 };
 
+const isValidDateString = (dateString) => /^\d{4}-\d{2}-\d{2}$/.test(dateString);
+const isValidTimeString = (timeString) => /^\d{2}:\d{2}(:\d{2})?$/.test(timeString);
+const normalizeTimeString = (timeString) => {
+    if (!timeString) return null;
+    const parts = timeString.split(':');
+    if (parts.length === 2) {
+        return `${parts[0]}:${parts[1]}:00`;
+    }
+    if (parts.length === 3) {
+        return timeString;
+    }
+    return null;
+};
+
 // Build a Date in UTC that represents the given wall time in the target timezone
 const buildDateInTimeZone = (dateString, timeString, timeZone) => {
-    const offsetMinutes = getOffsetForTimeZone(new Date(), timeZone);
-    const offsetStr = formatOffset(offsetMinutes);
-
     if (dateString && timeString) {
-        return new Date(`${dateString}T${timeString}${offsetStr}`);
+        const normalizedTime = normalizeTimeString(timeString);
+        const baseDate = new Date(`${dateString}T${normalizedTime}Z`);
+        const offsetMinutes = getOffsetForTimeZone(baseDate, timeZone);
+        const offsetStr = formatOffset(offsetMinutes);
+        return new Date(`${dateString}T${normalizedTime}${offsetStr}`);
     }
 
     // If no explicit date/time provided, use "now" in the target timezone
     const now = new Date();
+    const offsetMinutes = getOffsetForTimeZone(now, timeZone);
+    const offsetStr = formatOffset(offsetMinutes);
     const parts = new Intl.DateTimeFormat('en-CA', {
         timeZone,
         year: 'numeric',
@@ -142,9 +159,16 @@ const getCustomerByPhone = async (fromPhoneNumber, agentId) => {
     console.log('⚠️ Contact not found, searching all locations (this may take a while)...');
     const locationData = await serviceTradeService.getLocations(supabaseAuthToken);
     const normalizePhone = (phone) => phone ? phone.replace(/[()-\s]/g, '') : '';
-    const locationContactData = locationData.filter(({primaryContact}) => 
-        normalizePhone(primaryContact.phone) === normalizePhone(fromPhoneNumber)
-    );
+    const locationContactData = locationData.filter(({ primaryContact, phoneNumber }) => {
+        const normalizedSearch = normalizePhone(fromPhoneNumber);
+        const primaryMatch = primaryContact?.phone
+            ? normalizePhone(primaryContact.phone) === normalizedSearch
+            : false;
+        const locationMatch = phoneNumber
+            ? normalizePhone(phoneNumber) === normalizedSearch
+            : false;
+        return primaryMatch || locationMatch;
+    });
     
     if (locationContactData.length > 0) {
         console.log('✅ Contact found via location search');
@@ -161,11 +185,12 @@ const getCustomerByPhone = async (fromPhoneNumber, agentId) => {
             }
         }));
         
+        const primaryContact = locationContactData[0].primaryContact || null;
         return {
-            name: locationContactData[0].name || locationContactData[0].primaryContact.firstName + ' ' + locationContactData[0].primaryContact.lastName,
-            phone: locationContactData[0].primaryContact.phone,
-            email: locationContactData[0].primaryContact.email,
-            customerId: locationContactData[0].id,
+            name: locationContactData[0].name || (primaryContact ? `${primaryContact.firstName} ${primaryContact.lastName}` : ''),
+            phone: primaryContact?.phone || '',
+            email: primaryContact?.email || '',
+            customerId: primaryContact?.id || null,
             locations: locations,
             // Keep backward compatibility - include first location as default
             locationId: locationContactData[0].id,
@@ -360,6 +385,15 @@ const createJob = async (jobData, agentId) => {
         if (!locationId) {
             throw new Error('Missing required field: locationId');
         }
+        if ((appointmentDate && !appointmentTime) || (!appointmentDate && appointmentTime)) {
+            throw new Error('appointmentDate and appointmentTime must be provided together');
+        }
+        if (appointmentDate && !isValidDateString(appointmentDate)) {
+            throw new Error('Invalid appointmentDate format. Expected YYYY-MM-DD');
+        }
+        if (appointmentTime && !isValidTimeString(appointmentTime)) {
+            throw new Error('Invalid appointmentTime format. Expected HH:MM or HH:MM:SS');
+        }
 
         // Load job config overrides for this agent, if present
         const jobConfig = await supabaseService.getJobConfig(agentId).catch((err) => {
@@ -394,13 +428,19 @@ const createJob = async (jobData, agentId) => {
             return true; // default behavior
         })();
 
+        const normalizedAppointmentTime = normalizeTimeString(appointmentTime);
+        let appointmentDateTime = buildDateInTimeZone(appointmentDate, normalizedAppointmentTime, resolvedTimeZone);
+        console.log(`ℹ️ Appointment time in ${resolvedTimeZone}:`, appointmentDateTime.toLocaleString('en-US', { timeZone: resolvedTimeZone }));
+        appointmentDateTime = roundTimeUpToQuarter(appointmentDateTime);
+        console.log(`📅 Final appointment time in ${resolvedTimeZone}:`, appointmentDateTime.toLocaleString('en-US', { timeZone: resolvedTimeZone }));
+
         // If caller phone number provided, look up their contact ID
         let callerContactId = primaryContactId;
         if (callerPhoneNumber && !primaryContactId) {
             try {
                 console.log('📞 Looking up caller contact ID for phone:', callerPhoneNumber);
                 const callerData = await getCustomerByPhone(callerPhoneNumber, agentId);
-                callerContactId = callerData.customerId;
+                callerContactId = callerData.customerId || null;
                 console.log('✅ Found caller contact ID:', callerContactId);
             } catch (error) {
                 console.log('⚠️ Could not find caller contact ID:', error.message);
@@ -408,10 +448,23 @@ const createJob = async (jobData, agentId) => {
             }
         }
 
+        if (!callerContactId) {
+            try {
+                console.log('🔎 Fetching location primary contact for location:', locationId);
+                const location = await serviceTradeService.getLocationById(supabaseAuthToken, locationId);
+                callerContactId = location?.primaryContact?.id || location?.primaryContactId || null;
+                if (callerContactId) {
+                    console.log('✅ Found location primary contact ID:', callerContactId);
+                }
+            } catch (error) {
+                console.log('⚠️ Could not resolve location primary contact:', error.message);
+            }
+        }
+
         // Build dueBy date if provided
         let dueByDate = null;
         if (appointmentDate && appointmentTime) {
-            dueByDate = `${appointmentDate}T${appointmentTime}`;
+            dueByDate = appointmentDateTime.toISOString();
         }
 
         // Create Job
@@ -432,18 +485,10 @@ const createJob = async (jobData, agentId) => {
 
         // Create Appointment - without technician assignment
         let appointment = null;
-        let appointmentDateTime = null;
+        let appointmentErrorMessage = null;
+        let serviceRequestErrorMessage = null;
         try {
             console.log('📅 Creating appointment for job:', job.id);
-            
-            // Determine appointment date/time
-            appointmentDateTime = buildDateInTimeZone(appointmentDate, appointmentTime, resolvedTimeZone);
-            console.log(`ℹ️ Appointment time in ${resolvedTimeZone}:`, appointmentDateTime.toLocaleString('en-US', { timeZone: resolvedTimeZone }));
-            
-            // Round time UP to nearest 15-minute interval (00, 15, 30, 45)
-            appointmentDateTime = roundTimeUpToQuarter(appointmentDateTime);
-
-            console.log(`📅 Final appointment time in ${resolvedTimeZone}:`, appointmentDateTime.toLocaleString('en-US', { timeZone: resolvedTimeZone }));
 
             // Convert date/time to Unix timestamp (seconds)
             const windowStart = Math.floor(appointmentDateTime.getTime() / 1000);
@@ -485,6 +530,7 @@ const createJob = async (jobData, agentId) => {
                 } catch (serviceRequestError) {
                     console.error('❌ Service request creation failed:', serviceRequestError.message);
                     console.error('❌ Service request error stack:', serviceRequestError.stack);
+                    serviceRequestErrorMessage = serviceRequestError.message || 'Service request creation failed';
                     // Don't fail the entire job creation if service request fails
                 }
             } else {
@@ -492,14 +538,28 @@ const createJob = async (jobData, agentId) => {
             }
         } catch (appointmentError) {
             console.error('⚠️ Appointment creation failed:', appointmentError.message);
+            appointmentErrorMessage = appointmentError.message || 'Appointment creation failed';
             // Don't fail the entire job creation if appointment fails
+        }
+
+        if (callerContactId && !job.primaryContactId && !primaryContactId) {
+            try {
+                console.log('📝 Updating job primary contact:', callerContactId);
+                await serviceTradeService.updateJob(supabaseAuthToken, job.id, { primaryContactId: callerContactId });
+            } catch (error) {
+                console.error('⚠️ Failed to update job primary contact:', error.message);
+            }
         }
 
         const result = {
             jobId: job.id,
             locationId: locationId,
             companyId: companyId,
-            callId: call_id
+            callId: call_id,
+            appointmentCreated: Boolean(appointment && appointment.id),
+            serviceRequestCreated: Boolean(appointment && appointment.id && !serviceRequestErrorMessage),
+            appointmentError: appointmentErrorMessage,
+            serviceRequestError: serviceRequestErrorMessage
         };
 
         if (appointment) {

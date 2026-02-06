@@ -316,6 +316,29 @@ class ServiceTradeService {
         }
     }
 
+    async getLocationById(authToken, locationId) {
+        try {
+            const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+            const response = await fetch(`${this.baseUrl}/location/${locationId}`, {
+                method: "GET",
+                headers: {
+                    "Cookie": cookieValue,
+                    "Content-Type": "application/json"
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+            }
+
+            const { data } = await response.json();
+            return data?.location || data;
+        } catch (error) {
+            console.error('Error fetching location by ID from ServiceTrade:', error);
+            throw error;
+        }
+    }
+
 
 
     async createJob(authToken, locationId, jobData) {
@@ -360,6 +383,33 @@ class ServiceTradeService {
             return responseData.data?.job || responseData.job || responseData.data || responseData;
         } catch (error) {
             console.error('Error creating job in ServiceTrade:', error);
+            throw error;
+        }
+    }
+
+    async updateJob(authToken, jobId, jobData) {
+        try {
+            const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+            const response = await fetch(`${this.baseUrl}/job/${jobId}`, {
+                method: "PUT",
+                headers: {
+                    "Cookie": cookieValue,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(jobData)
+            });
+
+            const responseText = await response.text();
+            console.log('Job update response:', response.status, responseText);
+
+            if (!response.ok) {
+                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText} - ${responseText}`);
+            }
+
+            const responseData = JSON.parse(responseText);
+            return responseData.data?.job || responseData.job || responseData.data || responseData;
+        } catch (error) {
+            console.error('Error updating job in ServiceTrade:', error);
             throw error;
         }
     }
