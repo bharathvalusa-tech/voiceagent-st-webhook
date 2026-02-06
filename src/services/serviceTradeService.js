@@ -146,8 +146,11 @@ class ServiceTradeService {
     async searchLocationsByCompanyIds(authToken, companyIds) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+            
+            // Use companyId query param (comma-delimited list) for server-side filtering
+            const companyIdsParam = companyIds.join(',');
             const response = await fetch(
-                `${this.baseUrl}/location?status=active&limit=1000`,
+                `${this.baseUrl}/location?companyId=${companyIdsParam}&status=active&limit=1000`,
                 {
                     method: "GET",
                     headers: {
@@ -162,14 +165,7 @@ class ServiceTradeService {
             }
 
             const { data } = await response.json();
-            const locations = Array.isArray(data?.locations) ? data.locations : [];
-            const companyIdSet = new Set(companyIds.map((id) => String(id)));
-
-            return locations.filter((location) => {
-                const locationCompanyId = location?.company?.id;
-                if (!locationCompanyId) return false;
-                return companyIdSet.has(String(locationCompanyId));
-            });
+            return Array.isArray(data?.locations) ? data.locations : [];
         } catch (error) {
             console.error('Error searching locations by company ids from ServiceTrade:', error);
             throw error;

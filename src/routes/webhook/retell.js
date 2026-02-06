@@ -286,38 +286,58 @@ router.post('/retell', async (req, res) => {
             });
         }
 
-        if (!rawAddress) {
-            logWithContext('error', 'Missing address for validation', {
-                callId,
-                agentId,
-                callerPhone,
-                callerName
-            });
-            return res.status(200).json({
-                status: 'pending_review',
-                reason: 'missing_address',
-                message: 'Missing address'
-            });
-        }
+        // Try to validate address, but don't block if it fails
+        let validatedAddress = null;
+        let addressForMatching = null;
 
-        const validatedAddress = await validateAddress({
-            line1: addressLine1 || rawAddress,
-            city: addressCity,
-            state: addressState,
-            postalCode: addressPostal
-        });
-        if (!validatedAddress) {
-            logWithContext('error', 'Address validation failed', {
+        if (rawAddress) {
+            try {
+                validatedAddress = await validateAddress({
+                    line1: addressLine1 || rawAddress,
+                    city: addressCity,
+                    state: addressState,
+                    postalCode: addressPostal
+                });
+                
+                if (validatedAddress) {
+                    addressForMatching = [
+                        validatedAddress.street,
+                        validatedAddress.city,
+                        validatedAddress.state,
+                        validatedAddress.postalCode
+                    ].filter(Boolean).join(', ');
+                    
+                    logWithContext('info', 'Address validated successfully', {
+                        callId,
+                        agentId,
+                        validatedAddress: addressForMatching
+                    });
+                } else {
+                    // Validation failed, use raw address for matching
+                    addressForMatching = rawAddress;
+                    logWithContext('warn', 'Address validation failed, using raw address for matching', {
+                        callId,
+                        agentId,
+                        rawAddress
+                    });
+                }
+            } catch (error) {
+                // Validation error, use raw address for matching
+                addressForMatching = rawAddress;
+                logWithContext('warn', 'Address validation error, using raw address for matching', {
+                    callId,
+                    agentId,
+                    rawAddress,
+                    error: error.message
+                });
+            }
+        } else {
+            logWithContext('warn', 'No address provided, will match by phone/location/company only', {
                 callId,
                 agentId,
                 callerPhone,
-                callerName,
-                rawAddress
-            });
-            return res.status(200).json({
-                status: 'pending_review',
-                reason: 'invalid_address',
-                message: 'Invalid address'
+                locationName,
+                companyName
             });
         }
 
@@ -336,92 +356,175 @@ router.post('/retell', async (req, res) => {
 
         const authToken = tokenData[0].auth_token;
 
-        const validatedFullAddress = [
-            validatedAddress.street,
-            validatedAddress.city,
-            validatedAddress.state,
-            validatedAddress.postalCode
-        ]
-            .filter(Boolean)
-            .join(', ');
-
         const buildSearchData = (phone) => {
             return {
                 phone,
                 name: callerName,
                 locationName,
                 companyName,
-                address: validatedFullAddress || validatedAddress.formatted_address || validatedAddress.street
+                address: addressForMatching
             };
         };
 
         let matchedPhone = callerPhone;
         let candidates = await findCustomerWithConfidence(authToken, buildSearchData(callerPhone));
-        let bestMatch = candidates[0];
 
+        // Try fallback phone if primary phone didn't yield tier 1 or tier 2 matches
+        const hasTier1or2 = candidates.some(c => c.tier === 1 || c.tier === 2);
         const shouldTryFallbackPhone =
             callerPhoneFallback &&
             callerPhoneFallback !== callerPhone &&
-            (!bestMatch || bestMatch.confidence < config.matchingThresholds.confidence);
+            !hasTier1or2;
 
         if (shouldTryFallbackPhone) {
             const fallbackCandidates = await findCustomerWithConfidence(
                 authToken,
                 buildSearchData(callerPhoneFallback)
             );
-            const fallbackBestMatch = fallbackCandidates[0];
-            if (
-                fallbackBestMatch &&
-                fallbackBestMatch.confidence >= config.matchingThresholds.confidence &&
-                fallbackBestMatch.locationId
-            ) {
+            const fallbackHasTier1or2 = fallbackCandidates.some(c => c.tier === 1 || c.tier === 2);
+            
+            if (fallbackHasTier1or2) {
                 candidates = fallbackCandidates;
-                bestMatch = fallbackBestMatch;
                 matchedPhone = callerPhoneFallback;
+                logWithContext('info', 'Using fallback phone for better match', {
+                    callId,
+                    agentId,
+                    fallbackPhone: callerPhoneFallback
+                });
             }
         }
 
-        if (!bestMatch || bestMatch.confidence < config.matchingThresholds.confidence || !bestMatch.locationId) {
-            logWithContext('error', 'Low confidence match - manual review needed', {
+        // No candidates at all
+        if (candidates.length === 0) {
+            logWithContext('error', 'No matching locations found', {
                 callId,
                 agentId,
                 callerPhone: matchedPhone,
                 callerName,
-                address: validatedAddress.formatted_address,
-                candidatesCount: candidates.length,
-                topCandidate: bestMatch
-                    ? {
-                          locationId: bestMatch.locationId,
-                          locationName: bestMatch.locationName,
-                          confidence: bestMatch.confidence,
-                          phoneExact: bestMatch.phoneExact,
-                          addressSimilarity: bestMatch.addressSimilarity,
-                          locationSimilarity: bestMatch.locationSimilarity,
-                          companySimilarity: bestMatch.companySimilarity,
-                          nameSimilarity: bestMatch.nameSimilarity
-                      }
-                    : null,
-                bestMatch,
-                confidenceThreshold: config.matchingThresholds.confidence
+                locationName,
+                companyName,
+                address: addressForMatching
             });
             return res.status(200).json({
                 status: 'pending_review',
-                reason: 'low_confidence_match',
-                message: 'Low confidence match',
-                details: {
-                    bestMatch,
-                    candidatesCount: candidates.length,
-                    confidenceThreshold: config.matchingThresholds.confidence
+                reason: 'no_matches',
+                message: 'No matching locations found in ServiceTrade',
+                searchCriteria: {
+                    phone: matchedPhone,
+                    locationName,
+                    companyName,
+                    address: addressForMatching
                 }
+            });
+        }
+
+        // Separate candidates by tier
+        const tier1Candidates = candidates.filter(c => c.tier === 1 && c.locationId);
+        const tier2Candidates = candidates.filter(c => c.tier === 2 && c.locationId);
+        const tier3Candidates = candidates.filter(c => c.tier === 3 && c.locationId);
+
+        let selectedCandidate = null;
+        let matchTier = null;
+
+        // Tier 1: High confidence - auto-create
+        if (tier1Candidates.length > 0) {
+            selectedCandidate = tier1Candidates[0];
+            matchTier = 1;
+            
+            logWithContext('info', 'Tier 1 match found - high confidence', {
+                callId,
+                agentId,
+                locationId: selectedCandidate.locationId,
+                locationName: selectedCandidate.locationName,
+                tierReason: selectedCandidate.tierReason,
+                tier1Count: tier1Candidates.length
+            });
+        }
+        // Tier 2: Medium confidence - create with note
+        else if (tier2Candidates.length > 0) {
+            // Check if all tier 2 candidates point to the same location
+            const uniqueLocationIds = [...new Set(tier2Candidates.map(c => c.locationId))];
+            
+            if (uniqueLocationIds.length === 1) {
+                selectedCandidate = tier2Candidates[0];
+                matchTier = 2;
+                
+                logWithContext('info', 'Tier 2 match found - medium confidence, single location', {
+                    callId,
+                    agentId,
+                    locationId: selectedCandidate.locationId,
+                    locationName: selectedCandidate.locationName,
+                    tierReason: selectedCandidate.tierReason,
+                    tier2Count: tier2Candidates.length
+                });
+            } else {
+                // Multiple different locations in tier 2 - needs review
+                logWithContext('warn', 'Multiple tier 2 locations found - manual review needed', {
+                    callId,
+                    agentId,
+                    tier2Count: tier2Candidates.length,
+                    locationIds: uniqueLocationIds,
+                    topCandidates: tier2Candidates.slice(0, 3).map(c => ({
+                        locationId: c.locationId,
+                        locationName: c.locationName,
+                        companyName: c.companyName,
+                        tierReason: c.tierReason
+                    }))
+                });
+                
+                return res.status(200).json({
+                    status: 'pending_review',
+                    reason: 'multiple_medium_confidence_matches',
+                    message: 'Multiple possible locations found',
+                    candidates: tier2Candidates.slice(0, 3).map(c => ({
+                        locationId: c.locationId,
+                        locationName: c.locationName,
+                        companyName: c.companyName,
+                        address: c.address,
+                        tierReason: c.tierReason
+                    }))
+                });
+            }
+        }
+        // Tier 3: Low confidence - needs review
+        else {
+            logWithContext('warn', 'Only tier 3 matches found - manual review needed', {
+                callId,
+                agentId,
+                tier3Count: tier3Candidates.length,
+                topCandidates: tier3Candidates.slice(0, 3).map(c => ({
+                    locationId: c.locationId,
+                    locationName: c.locationName,
+                    companyName: c.companyName,
+                    tierReason: c.tierReason
+                }))
+            });
+            
+            return res.status(200).json({
+                status: 'pending_review',
+                reason: 'low_confidence_matches',
+                message: 'Only weak matches found',
+                candidates: tier3Candidates.slice(0, 3).map(c => ({
+                    locationId: c.locationId,
+                    locationName: c.locationName,
+                    companyName: c.companyName,
+                    address: c.address,
+                    tierReason: c.tierReason
+                }))
             });
         }
 
         const jobDescription = buildJobDescription(issueDescription, callerName);
 
+        // Add match tier info to job description for tier 2
+        const jobDescriptionWithNote = matchTier === 2 
+            ? `${jobDescription}\n\n[Match Note: ${selectedCandidate.tierReason}]`
+            : jobDescription;
+
         const jobResult = await createJob(
             {
-                locationId: bestMatch.locationId,
-                description: jobDescription,
+                locationId: selectedCandidate.locationId,
+                description: jobDescriptionWithNote,
                 callerPhoneNumber: matchedPhone,
                 call_id: callId,
                 techIds: techIds
@@ -432,18 +535,24 @@ router.post('/retell', async (req, res) => {
         logWithContext('info', 'Job created successfully', {
             callId,
             agentId,
-            locationId: bestMatch.locationId,
-            confidence: bestMatch.confidence,
+            locationId: selectedCandidate.locationId,
+            locationName: selectedCandidate.locationName,
+            matchTier: matchTier,
+            tierReason: selectedCandidate.tierReason,
             jobId: jobResult?.jobId,
-            techIds: techIds.length > 0 ? techIds : null
+            techIds: techIds.length > 0 ? techIds : null,
+            addressValidated: validatedAddress ? true : false
         });
 
         return res.status(200).json({
             status: 'success',
             job: jobResult,
             match: {
-                locationId: bestMatch.locationId,
-                confidence: bestMatch.confidence
+                locationId: selectedCandidate.locationId,
+                locationName: selectedCandidate.locationName,
+                companyName: selectedCandidate.companyName,
+                tier: matchTier,
+                tierReason: selectedCandidate.tierReason
             }
         });
     } catch (error) {

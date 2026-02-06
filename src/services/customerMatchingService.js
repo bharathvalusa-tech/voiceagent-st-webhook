@@ -64,14 +64,14 @@ const buildCandidate = ({ contact, location, source }) => {
         contactEmail: contact?.email || '',
         locationId: location?.id || null,
         locationName: location?.name || '',
+        companyId: location?.company?.id || null,
         companyName: location?.company?.name || '',
         address: location?.address || null
     };
 };
 
-const scoreCandidate = (candidate, searchData) => {
-    let score = 0;
-
+const determineMatchQuality = (candidate, searchData, allCandidates) => {
+    // Phone exact match
     const normalizedSearchPhone = normalizePhone(searchData.phone);
     const normalizedCandidatePhone = normalizePhone(candidate.contactPhone);
     const phoneExact = Boolean(
@@ -79,69 +79,151 @@ const scoreCandidate = (candidate, searchData) => {
             normalizedCandidatePhone &&
             normalizedSearchPhone === normalizedCandidatePhone
     );
-    if (phoneExact) {
-        score += 40;
-    }
 
+    // Location name exact match (case-insensitive, normalized)
+    const locationNameExact = Boolean(
+        searchData.locationName &&
+        candidate.locationName &&
+        normalizeText(searchData.locationName) === normalizeText(candidate.locationName)
+    );
+
+    // Location name fuzzy match
+    const locationNameFuzzy = searchData.locationName && candidate.locationName
+        ? fuzzySimilarity(searchData.locationName, candidate.locationName)
+        : 0;
+
+    // Company name exact match
+    const companyNameExact = Boolean(
+        searchData.companyName &&
+        candidate.companyName &&
+        normalizeText(searchData.companyName) === normalizeText(candidate.companyName)
+    );
+
+    // Company name fuzzy match
+    const companyNameFuzzy = searchData.companyName && candidate.companyName
+        ? fuzzySimilarity(searchData.companyName, candidate.companyName)
+        : 0;
+
+    // Cross-matching: Check if locationName matches companyName (customer might say company as location)
+    const locationNameMatchesCompany = Boolean(
+        searchData.locationName &&
+        candidate.companyName &&
+        normalizeText(searchData.locationName) === normalizeText(candidate.companyName)
+    );
+
+    const locationNameMatchesCompanyFuzzy = searchData.locationName && candidate.companyName
+        ? fuzzySimilarity(searchData.locationName, candidate.companyName)
+        : 0;
+
+    // Cross-matching: Check if companyName matches locationName (customer might say location as company)
+    const companyNameMatchesLocation = Boolean(
+        searchData.companyName &&
+        candidate.locationName &&
+        normalizeText(searchData.companyName) === normalizeText(candidate.locationName)
+    );
+
+    const companyNameMatchesLocationFuzzy = searchData.companyName && candidate.locationName
+        ? fuzzySimilarity(searchData.companyName, candidate.locationName)
+        : 0;
+
+    // Address match (use lower threshold for more flexibility)
     let addressSimilarityScore = 0;
+    let addressMatch = false;
     if (searchData.address && candidate.address) {
         const candidateAddress = `${candidate.address.street || ''} ${candidate.address.city || ''} ${candidate.address.state || ''} ${candidate.address.postalCode || ''}`.trim();
         addressSimilarityScore = addressSimilarity(searchData.address, candidateAddress);
-        if (addressSimilarityScore === 1) {
-            score += 30;
-        } else if (addressSimilarityScore > config.matchingThresholds.fuzzySimilarity) {
-            score += 15;
-        }
+        addressMatch = addressSimilarityScore > 0.6; // Lower threshold from 0.8
     }
 
-    let locationSimilarity = 0;
-    if (searchData.locationName && candidate.locationName) {
-        locationSimilarity = fuzzySimilarity(searchData.locationName, candidate.locationName);
-        if (normalizeText(searchData.locationName) === normalizeText(candidate.locationName)) {
-            score += 30;
-        } else if (locationSimilarity > config.matchingThresholds.fuzzySimilarity) {
-            score += 15;
-        }
-    }
+    // Contact name match
+    const nameSimilarity = searchData.name && candidate.contactName
+        ? fuzzySimilarity(searchData.name, candidate.contactName)
+        : 0;
+    const nameMatch = nameSimilarity > 0.6;
 
-    let companySimilarity = 0;
-    if (searchData.companyName && candidate.companyName) {
-        companySimilarity = fuzzySimilarity(searchData.companyName, candidate.companyName);
-        if (normalizeText(searchData.companyName) === normalizeText(candidate.companyName)) {
-            score += 30;
-        } else if (companySimilarity > config.matchingThresholds.fuzzySimilarity) {
-            score += 15;
-        }
-    }
+    // Count how many locations this contact/company has
+    const companyId = candidate.companyName ? 
+        allCandidates.find(c => c.companyName === candidate.companyName)?.locationId : null;
+    const locationsForCompany = companyId ? 
+        allCandidates.filter(c => c.companyName === candidate.companyName).length : 0;
 
-    let nameSimilarity = 0;
-    if (searchData.name && candidate.contactName) {
-        nameSimilarity = fuzzySimilarity(searchData.name, candidate.contactName);
-        if (normalizeText(searchData.name) === normalizeText(candidate.contactName)) {
-            score += 20;
-        } else if (nameSimilarity > config.matchingThresholds.nameSimilarity) {
-            score += 15;
-        }
-    }
+    // Classify into tiers
+    let tier = 3; // Default: low confidence
+    let tierReason = 'no_strong_match';
 
-    if (
-        phoneExact &&
-        addressSimilarityScore >= config.matchingThresholds.fuzzySimilarity
-    ) {
-        score = 100;
+    // Tier 1: High confidence - auto-create job
+    if (phoneExact && addressMatch) {
+        tier = 1;
+        tierReason = 'phone_and_address_match';
+    } else if (locationNameExact && addressMatch) {
+        tier = 1;
+        tierReason = 'location_name_and_address_match';
+    } else if (locationNameMatchesCompany && addressMatch) {
+        tier = 1;
+        tierReason = 'location_as_company_and_address_match';
+    } else if (phoneExact && locationsForCompany === 1) {
+        tier = 1;
+        tierReason = 'phone_match_single_location';
+    } else if (phoneExact) {
+        tier = 1;
+        tierReason = 'phone_match';
+    } else if (locationNameExact && companyNameExact) {
+        tier = 1;
+        tierReason = 'location_and_company_exact';
+    } else if (locationNameMatchesCompany && locationsForCompany === 1) {
+        tier = 1;
+        tierReason = 'location_as_company_single_location';
     }
-
-    if (score > 100) {
-        score = 100;
+    // Tier 2: Medium confidence - create with note
+    else if (locationNameExact) {
+        tier = 2;
+        tierReason = 'location_name_exact';
+    } else if (locationNameMatchesCompany) {
+        tier = 2;
+        tierReason = 'location_name_matches_company';
+    } else if (companyNameMatchesLocation) {
+        tier = 2;
+        tierReason = 'company_name_matches_location';
+    } else if (companyNameExact && locationsForCompany === 1) {
+        tier = 2;
+        tierReason = 'company_match_single_location';
+    } else if (companyNameExact && addressMatch) {
+        tier = 2;
+        tierReason = 'company_and_address_match';
+    } else if (locationNameMatchesCompany && addressMatch) {
+        tier = 2;
+        tierReason = 'location_as_company_and_address';
+    } else if (locationNameFuzzy > 0.8 && addressMatch) {
+        tier = 2;
+        tierReason = 'location_fuzzy_and_address';
+    } else if (companyNameFuzzy > 0.8 && locationNameFuzzy > 0.8) {
+        tier = 2;
+        tierReason = 'company_and_location_fuzzy';
+    } else if (locationNameMatchesCompanyFuzzy > 0.8 && addressMatch) {
+        tier = 2;
+        tierReason = 'location_as_company_fuzzy_and_address';
+    }
+    // Tier 3: Low confidence - needs review
+    else if (companyNameExact || locationNameFuzzy > 0.7 || addressMatch || locationNameMatchesCompanyFuzzy > 0.7) {
+        tier = 3;
+        tierReason = 'weak_match';
     }
 
     return {
-        confidence: score,
+        tier,
+        tierReason,
         phoneExact,
+        locationNameExact,
+        companyNameExact,
+        locationNameMatchesCompany,
+        companyNameMatchesLocation,
+        addressMatch,
         addressSimilarity: addressSimilarityScore,
-        locationSimilarity,
-        companySimilarity,
-        nameSimilarity
+        locationSimilarity: locationNameFuzzy,
+        companySimilarity: companyNameFuzzy,
+        nameSimilarity,
+        nameMatch,
+        locationsForCompany
     };
 };
 
@@ -286,6 +368,10 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
     if (searchData.locationName) {
         tasks.push(searchByLocationName(authToken, searchData.locationName));
         taskLabels.push('location_name');
+        
+        // Also search as company name (customer might say company instead of location)
+        tasks.push(searchByCompanyName(authToken, searchData.locationName));
+        taskLabels.push('location_name_as_company');
     }
     if (searchData.address) {
         tasks.push(searchByAddress(authToken, searchData.address));
@@ -294,6 +380,10 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
     if (searchData.companyName) {
         tasks.push(searchByCompanyName(authToken, searchData.companyName));
         taskLabels.push('company_name');
+        
+        // Also search as location name (customer might say location instead of company)
+        tasks.push(searchByLocationName(authToken, searchData.companyName));
+        taskLabels.push('company_name_as_location');
     }
 
     const results = await Promise.all(tasks);
@@ -307,12 +397,26 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         }
     });
 
-    const scoredCandidates = Array.from(deduped.values()).map((candidate) => ({
+    const allCandidates = Array.from(deduped.values());
+    
+    const tieredCandidates = allCandidates.map((candidate) => ({
         ...candidate,
-        ...scoreCandidate(candidate, searchData)
+        ...determineMatchQuality(candidate, searchData, allCandidates)
     }));
 
-    scoredCandidates.sort((a, b) => {
+    // Sort by tier (1 = best), then by match quality within tier
+    tieredCandidates.sort((a, b) => {
+        // Sort by tier first (lower tier number = higher priority)
+        if (a.tier !== b.tier) return a.tier - b.tier;
+
+        // Within same tier, sort by match quality
+        // Tier 1: prefer phone+address over phone alone
+        if (a.tier === 1) {
+            if (a.phoneExact && a.addressMatch && !(b.phoneExact && b.addressMatch)) return -1;
+            if (b.phoneExact && b.addressMatch && !(a.phoneExact && a.addressMatch)) return 1;
+        }
+
+        // Sort by similarity scores
         const addressSort = (b.addressSimilarity || 0) - (a.addressSimilarity || 0);
         if (addressSort !== 0) return addressSort;
 
@@ -322,33 +426,35 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         const companySort = (b.companySimilarity || 0) - (a.companySimilarity || 0);
         if (companySort !== 0) return companySort;
 
-        const nameSort = (b.nameSimilarity || 0) - (a.nameSimilarity || 0);
-        if (nameSort !== 0) return nameSort;
-
         const phoneSort = (b.phoneExact ? 1 : 0) - (a.phoneExact ? 1 : 0);
-        if (phoneSort !== 0) return phoneSort;
-
-        return b.confidence - a.confidence;
+        return phoneSort;
     });
 
-    const topCandidates = scoredCandidates.slice(0, 3).map((candidate) => ({
+    const topCandidates = tieredCandidates.slice(0, 5).map((candidate) => ({
         locationId: candidate.locationId,
         locationName: candidate.locationName,
+        companyName: candidate.companyName,
         contactName: candidate.contactName,
-        confidence: candidate.confidence,
+        tier: candidate.tier,
+        tierReason: candidate.tierReason,
         phoneExact: candidate.phoneExact,
+        locationNameExact: candidate.locationNameExact,
+        companyNameExact: candidate.companyNameExact,
+        addressMatch: candidate.addressMatch,
         addressSimilarity: candidate.addressSimilarity,
         locationSimilarity: candidate.locationSimilarity,
-        companySimilarity: candidate.companySimilarity,
-        nameSimilarity: candidate.nameSimilarity
+        companySimilarity: candidate.companySimilarity
     }));
 
     logMatchEvent('matching_summary', {
         searchData,
-        candidateCount: scoredCandidates.length,
+        candidateCount: tieredCandidates.length,
+        tier1Count: tieredCandidates.filter(c => c.tier === 1).length,
+        tier2Count: tieredCandidates.filter(c => c.tier === 2).length,
+        tier3Count: tieredCandidates.filter(c => c.tier === 3).length,
         topCandidates
     });
-    return scoredCandidates;
+    return tieredCandidates;
 };
 
 module.exports = {
