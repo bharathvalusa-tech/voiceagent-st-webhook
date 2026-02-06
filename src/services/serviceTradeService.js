@@ -233,10 +233,9 @@ class ServiceTradeService {
     async getLocations(authToken) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
-            const allLocations = [];
             
             // Fetch first page to get totalPages
-            const firstResponse = await fetch(`${this.baseUrl}/location?page=1`, {
+            const firstResponse = await fetch(`${this.baseUrl}/location?page=1&limit=1000`, {
                 method: "GET",
                 headers: {
                     "Cookie": cookieValue,
@@ -251,30 +250,33 @@ class ServiceTradeService {
             const { data: firstPageData } = await firstResponse.json();
             const totalPages = firstPageData.totalPages || 1;
             
-            // Add locations from first page
-            if (firstPageData.locations && Array.isArray(firstPageData.locations)) {
-                allLocations.push(...firstPageData.locations);
+            console.log(`📊 Fetching ${totalPages} pages of locations in parallel (limit=1000 per page)...`);
+            
+            // Fetch ALL pages in parallel (including first page again for simplicity)
+            const pagePromises = [];
+            for (let page = 1; page <= totalPages; page++) {
+                pagePromises.push(
+                    fetch(`${this.baseUrl}/location?page=${page}&limit=1000`, {
+                        method: "GET",
+                        headers: {
+                            "Cookie": cookieValue,
+                            "Content-Type": "application/json"
+                        }
+                    }).then(async (response) => {
+                        if (!response.ok) {
+                            throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+                        }
+                        const { data } = await response.json();
+                        return data.locations || [];
+                    })
+                );
             }
             
-            // Fetch remaining pages
-            for (let page = 2; page <= totalPages; page++) {
-                const response = await fetch(`${this.baseUrl}/location?page=${page}`, {
-                    method: "GET",
-                    headers: {
-                        "Cookie": cookieValue,
-                        "Content-Type": "application/json"
-                    }
-                });
-
-                if (!response.ok) {
-                    throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
-                }
-
-                const { data } = await response.json();
-                if (data.locations && Array.isArray(data.locations)) {
-                    allLocations.push(...data.locations);
-                }
-            }
+            // Wait for all pages to complete in parallel
+            const allPages = await Promise.all(pagePromises);
+            
+            // Flatten all locations from all pages
+            const allLocations = allPages.flat();
             if (allLocations.length > 0) {
                 return allLocations.filter((location) => {
                     if (!location) return false;
