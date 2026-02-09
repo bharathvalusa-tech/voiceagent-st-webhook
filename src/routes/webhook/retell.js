@@ -520,15 +520,10 @@ router.post('/retell', async (req, res) => {
 
         const jobDescription = buildJobDescription(issueDescription, callerName);
 
-        // Add match tier info to job description for tier 2
-        const jobDescriptionWithNote = matchTier === 2 
-            ? `${jobDescription}\n\n[Match Note: ${selectedCandidate.tierReason}]`
-            : jobDescription;
-
         const jobResult = await createJob(
             {
                 locationId: selectedCandidate.locationId,
-                description: jobDescriptionWithNote,
+                description: jobDescription,
                 callerPhoneNumber: matchedPhone,
                 call_id: callId,
                 techIds: techIds
