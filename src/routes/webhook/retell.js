@@ -86,6 +86,10 @@ router.post('/retell', async (req, res) => {
                 sourceExtracted?.caller_name ||
                 sourceExtracted?.customer_name ||
                 sourceExtracted?.name ||
+                sourceDynamicVars?.customerName ||
+                sourceDynamicVars?.customer_name ||
+                sourceDynamicVars?.callerName ||
+                sourceDynamicVars?.caller_name ||
                 null;
 
             const addressLine1 =
