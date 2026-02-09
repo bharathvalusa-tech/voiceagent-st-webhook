@@ -161,6 +161,14 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
     } else if (locationNameMatchesCompany && addressMatch) {
         tier = 1;
         tierReason = 'location_as_company_and_address_match';
+    } else if (companyNameExact && addressMatch) {
+        // Company name + address is high confidence
+        tier = 1;
+        tierReason = 'company_and_address_exact';
+    } else if (companyNameFuzzy > 0.9 && addressMatch) {
+        // Very high company name similarity + address match
+        tier = 1;
+        tierReason = 'company_fuzzy_and_address_match';
     } else if (phoneExact && locationsForCompany === 1) {
         tier = 1;
         tierReason = 'phone_match_single_location';
@@ -187,9 +195,10 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
     } else if (companyNameExact && locationsForCompany === 1) {
         tier = 2;
         tierReason = 'company_match_single_location';
-    } else if (companyNameExact && addressMatch) {
+    } else if (companyNameFuzzy > 0.8 && addressMatch) {
+        // Good company match + address (but not high enough for Tier 1)
         tier = 2;
-        tierReason = 'company_and_address_match';
+        tierReason = 'company_fuzzy_and_address';
     } else if (locationNameMatchesCompany && addressMatch) {
         tier = 2;
         tierReason = 'location_as_company_and_address';
