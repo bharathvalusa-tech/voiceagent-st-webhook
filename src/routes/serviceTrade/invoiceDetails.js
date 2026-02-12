@@ -17,14 +17,56 @@ router.post('/st-invoice', async (req, res) => {
             return sendErrorResponse(res, 'agent_id is required', 400);
         }
         
-        // Step 1: Fetch customer info
+        // Step 1: Fetch customer info (includes all locations)
         const customerData = await getCustomerByPhone(fromPhoneNumber, agentId);
         
-        // Step 2: Fetch job info
-        const jobDetails = await getJobsByLocation(customerData.locationId, agentId, status);
-        
-        // Step 3: Fetch invoices
-        const invoices = await getInvoicesByJobId(jobDetails[0].jobId, agentId);
+        // Step 2: Fetch jobs across ALL locations the contact is associated with
+        const locations = customerData.locations || [];
+        const locationIds = locations.map(loc => loc.id).filter(Boolean);
+
+        if (locationIds.length === 0) {
+            return sendErrorResponse(res, 'Customer has no associated locations', 404);
+        }
+
+        const jobPromises = locationIds.map(locId =>
+            getJobsByLocation(locId, agentId, status).catch(err => {
+                console.log(`⚠️ Failed to fetch jobs for location ${locId}:`, err.message);
+                return [];
+            })
+        );
+        const jobArrays = await Promise.all(jobPromises);
+        const allJobs = jobArrays.flat();
+
+        // Deduplicate jobs by jobId
+        const seenJobs = new Set();
+        const jobDetails = allJobs.filter(job => {
+            if (seenJobs.has(job.jobId)) return false;
+            seenJobs.add(job.jobId);
+            return true;
+        });
+
+        if (jobDetails.length === 0) {
+            return res.status(200).json({ invoices: [] });
+        }
+
+        // Step 3: Fetch invoices for ALL jobs (not just the first one)
+        const invoicePromises = jobDetails.map(job =>
+            getInvoicesByJobId(job.jobId, agentId).catch(err => {
+                console.log(`⚠️ Failed to fetch invoices for job ${job.jobId}:`, err.message);
+                return [];
+            })
+        );
+        const invoiceArrays = await Promise.all(invoicePromises);
+        const allInvoices = invoiceArrays.flat();
+
+        // Deduplicate invoices by id
+        const seenInvoices = new Set();
+        const invoices = allInvoices.filter(inv => {
+            const invId = inv?.id || inv?.invoiceId;
+            if (!invId || seenInvoices.has(invId)) return false;
+            seenInvoices.add(invId);
+            return true;
+        });
         
         return res.status(200).json({
             invoices: invoices

@@ -175,8 +175,9 @@ class ServiceTradeService {
     async searchLocationsByAddress(authToken, addressQuery) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
-            const response = await fetch(
-                `${this.baseUrl}/location?status=active&limit=1000`,
+            // Address matching must scan all active locations, not only page 1.
+            const firstResponse = await fetch(
+                `${this.baseUrl}/location?page=1&status=active&limit=1000`,
                 {
                     method: "GET",
                     headers: {
@@ -186,17 +187,40 @@ class ServiceTradeService {
                 }
             );
 
-            if (!response.ok) {
-                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+            if (!firstResponse.ok) {
+                throw new Error(`ServiceTrade API error: ${firstResponse.status} ${firstResponse.statusText}`);
             }
 
-            const { data } = await response.json();
-            const locations = Array.isArray(data?.locations) ? data.locations : [];
+            const { data: firstPageData } = await firstResponse.json();
+            const totalPages = firstPageData?.totalPages || 1;
+            const pagePromises = [];
+
+            for (let page = 1; page <= totalPages; page += 1) {
+                pagePromises.push(
+                    fetch(`${this.baseUrl}/location?page=${page}&status=active&limit=1000`, {
+                        method: "GET",
+                        headers: {
+                            "Cookie": cookieValue,
+                            "Content-Type": "application/json"
+                        }
+                    }).then(async (response) => {
+                        if (!response.ok) {
+                            throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+                        }
+                        const { data } = await response.json();
+                        return Array.isArray(data?.locations) ? data.locations : [];
+                    })
+                );
+            }
+
+            const pages = await Promise.all(pagePromises);
+            const locations = pages.flat();
 
             const normalizeAddressText = (text) => {
                 const lower = (text || '').toLowerCase();
                 return lower
                     .replace(/[^a-z0-9\s]/g, ' ')
+                    // Normalize common street suffix abbreviations
                     .replace(/\bst\b/g, 'street')
                     .replace(/\bste\b/g, 'suite')
                     .replace(/\bave\b/g, 'avenue')
@@ -207,21 +231,67 @@ class ServiceTradeService {
                     .replace(/\bln\b/g, 'lane')
                     .replace(/\bpkwy\b/g, 'parkway')
                     .replace(/\bter\b/g, 'terrace')
+                    .replace(/\bcir\b/g, 'circle')
+                    .replace(/\bctr\b/g, 'center')
                     .replace(/\bapt\b/g, 'apartment')
                     .replace(/\s+/g, ' ')
                     .trim();
             };
 
             const normalizedQuery = normalizeAddressText(addressQuery);
+            const dropNoiseTokens = (text) =>
+                text
+                    .split(' ')
+                    .filter(Boolean)
+                    // Remove suite/unit and street suffix tokens that often vary in speech/transcription
+                    .filter(
+                        (token) =>
+                            ![
+                                'suite', 'unit', 'apartment', 'floor',
+                                'street', 'avenue', 'road', 'drive', 'boulevard',
+                                'court', 'lane', 'parkway', 'terrace', 'circle',
+                                'center'
+                            ].includes(token)
+                    )
+                    .join(' ');
+            const extractPostal = (text) => {
+                const match = (text || '').match(/\b\d{5}\b/);
+                return match ? match[0] : null;
+            };
+            const computeTokenOverlap = (a, b) => {
+                const aTokens = new Set((a || '').split(' ').filter(Boolean));
+                const bTokens = new Set((b || '').split(' ').filter(Boolean));
+                if (aTokens.size === 0 || bTokens.size === 0) return 0;
+                let intersection = 0;
+                aTokens.forEach((token) => {
+                    if (bTokens.has(token)) intersection += 1;
+                });
+                return intersection / aTokens.size;
+            };
+            const queryCore = dropNoiseTokens(normalizedQuery);
+            const queryPostal = extractPostal(normalizedQuery);
 
             return locations.filter((location) => {
                 if (!location?.address) return false;
                 const fullAddress = `${location.address.street} ${location.address.city} ${location.address.state} ${location.address.postalCode}`;
                 const normalizedAddress = normalizeAddressText(fullAddress);
                 const normalizedStreet = normalizeAddressText(location.address.street || '');
-                return (
+                const addressCore = dropNoiseTokens(normalizedAddress);
+                const streetCore = dropNoiseTokens(normalizedStreet);
+                const tokenOverlap = Math.max(
+                    computeTokenOverlap(queryCore, addressCore),
+                    computeTokenOverlap(queryCore, streetCore)
+                );
+                const locationPostal = extractPostal(normalizedAddress);
+                const postalMatches = Boolean(queryPostal && locationPostal && queryPostal === locationPostal);
+                const strongLegacyIncludes =
                     normalizedAddress.includes(normalizedQuery) ||
-                    normalizedQuery.includes(normalizedStreet)
+                    normalizedQuery.includes(normalizedStreet);
+
+                return (
+                    strongLegacyIncludes ||
+                    (postalMatches && tokenOverlap >= 0.5) ||
+                    tokenOverlap >= 0.8
                 );
             });
         } catch (error) {

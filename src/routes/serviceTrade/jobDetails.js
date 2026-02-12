@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { parsePhoneNumber } = require('libphonenumber-js');
 const { sendErrorResponse } = require('../../utils/responseHelper');
-const { getJobsByPhone, getCustomerByPhone, getJobsByLocation } = require('../../controllers/serviceTradeController');
+const { getCustomerByPhone, getJobsByLocation } = require('../../controllers/serviceTradeController');
 
 router.post('/st-job', async (req, res) => {
     try {
@@ -17,12 +17,37 @@ router.post('/st-job', async (req, res) => {
                 return sendErrorResponse(res, 'Invalid phone number format', 400);
             }
             const fromPhoneNumber = phoneNumber.nationalNumber;
-            const {locationId} =await getCustomerByPhone(fromPhoneNumber, agentId);
-            const jobs = await getJobsByLocation(locationId, agentId, status);
+            const customerData = await getCustomerByPhone(fromPhoneNumber, agentId);
+
+            // Query jobs across ALL locations the contact is associated with
+            const locations = customerData.locations || [];
+            const locationIds = locations.map(loc => loc.id).filter(Boolean);
+
+            if (locationIds.length === 0) {
+                return sendErrorResponse(res, 'Customer has no associated locations', 404);
+            }
+
+            const jobPromises = locationIds.map(locId =>
+                getJobsByLocation(locId, agentId, status).catch(err => {
+                    console.log(`⚠️ Failed to fetch jobs for location ${locId}:`, err.message);
+                    return [];
+                })
+            );
+            const jobArrays = await Promise.all(jobPromises);
+            const allJobs = jobArrays.flat();
+
+            // Deduplicate by jobId
+            const seen = new Set();
+            const jobs = allJobs.filter(job => {
+                if (seen.has(job.jobId)) return false;
+                seen.add(job.jobId);
+                return true;
+            });
+
             return res.status(200).json({
                 jobs
             });
-        }else {
+        } else {
             return sendErrorResponse(res, 'Either from_phone_number or location_id is required', 400);
         }
     } catch (error) {

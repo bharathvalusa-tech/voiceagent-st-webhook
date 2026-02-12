@@ -51,6 +51,83 @@ const buildJobDescription = (issueDescription, callerName) => {
     return `[AFTER HOURS]: ${name} reported ${replaced}`;
 };
 
+const validateCandidateAgainstRetellData = ({ candidate, searchContext }) => {
+    const hasAddressInput = Boolean(searchContext.addressForMatching);
+    const hasCompanyInput = Boolean(searchContext.companyName);
+    const hasLocationInput = Boolean(searchContext.locationName);
+    const hasPhoneInput = Boolean(searchContext.matchedPhone);
+
+    const addressMatches = Boolean(
+        candidate.addressMatch || (candidate.addressSimilarity || 0) >= 0.75
+    );
+    const companyMatches = Boolean(
+        candidate.companyNameExact ||
+        candidate.locationNameMatchesCompany ||
+        (candidate.companySimilarity || 0) >= 0.6
+    );
+    const locationMatches = Boolean(
+        candidate.locationNameExact ||
+        candidate.companyNameMatchesLocation ||
+        (candidate.locationSimilarity || 0) >= 0.75
+    );
+    const phoneMatches = Boolean(candidate.phoneExact);
+
+    const nonPhoneChecks = [
+        { field: 'address', provided: hasAddressInput, matched: addressMatches },
+        { field: 'company', provided: hasCompanyInput, matched: companyMatches },
+        { field: 'location', provided: hasLocationInput, matched: locationMatches }
+    ].filter((check) => check.provided);
+    const matchedNonPhoneChecks = nonPhoneChecks.filter((check) => check.matched);
+
+    // If caller provided richer identifiers (address/company/location), require at least one to match.
+    // This prevents phone-only associations from creating jobs at unrelated locations.
+    if (nonPhoneChecks.length > 0 && matchedNonPhoneChecks.length === 0) {
+        return {
+            isValid: false,
+            reason: 'retell_data_mismatch',
+            checks: {
+                addressMatches,
+                companyMatches,
+                locationMatches,
+                phoneMatches,
+                locationsForExactPhone: candidate.locationsForExactPhone || 0
+            }
+        };
+    }
+
+    // Additional guard: if phone maps to multiple locations, ensure at least one non-phone signal matches.
+    if (
+        hasPhoneInput &&
+        candidate.phoneExact &&
+        (candidate.locationsForExactPhone || 0) > 1 &&
+        matchedNonPhoneChecks.length === 0
+    ) {
+        return {
+            isValid: false,
+            reason: 'ambiguous_phone_mapping',
+            checks: {
+                addressMatches,
+                companyMatches,
+                locationMatches,
+                phoneMatches,
+                locationsForExactPhone: candidate.locationsForExactPhone || 0
+            }
+        };
+    }
+
+    return {
+        isValid: true,
+        reason: 'validated',
+        checks: {
+            addressMatches,
+            companyMatches,
+            locationMatches,
+            phoneMatches,
+            locationsForExactPhone: candidate.locationsForExactPhone || 0
+        }
+    };
+};
+
 router.post('/retell', async (req, res) => {
     try {
         const { eventType, call, analysis, extracted, dynamicVars } = extractPayload(req.body || {});
@@ -515,6 +592,40 @@ router.post('/retell', async (req, res) => {
                     address: c.address,
                     tierReason: c.tierReason
                 }))
+            });
+        }
+
+        const candidateValidation = validateCandidateAgainstRetellData({
+            candidate: selectedCandidate,
+            searchContext: {
+                matchedPhone,
+                addressForMatching,
+                companyName,
+                locationName
+            }
+        });
+        if (!candidateValidation.isValid) {
+            logWithContext('warn', 'Selected candidate failed Retell data validation', {
+                callId,
+                agentId,
+                locationId: selectedCandidate.locationId,
+                locationName: selectedCandidate.locationName,
+                tierReason: selectedCandidate.tierReason,
+                validationReason: candidateValidation.reason,
+                validationChecks: candidateValidation.checks
+            });
+            return res.status(200).json({
+                status: 'pending_review',
+                reason: 'retell_data_mismatch',
+                message: 'Selected location does not sufficiently match Retell call data',
+                candidate: {
+                    locationId: selectedCandidate.locationId,
+                    locationName: selectedCandidate.locationName,
+                    companyName: selectedCandidate.companyName,
+                    tier: selectedCandidate.tier,
+                    tierReason: selectedCandidate.tierReason
+                },
+                validation: candidateValidation
             });
         }
 

@@ -42,6 +42,12 @@ const bigramSimilarity = (a, b) => {
 
 const fuzzySimilarity = (a, b) => Math.max(tokenSimilarity(a, b), bigramSimilarity(a, b));
 
+const getSearchPrefix = (name, prefixLen = 5) => {
+    const trimmed = (name || '').trim();
+    if (trimmed.length <= prefixLen) return trimmed;
+    return trimmed.slice(0, prefixLen);
+};
+
 const addressSimilarity = (a, b) => {
     const aNorm = normalizeText(a);
     const bNorm = normalizeText(b);
@@ -104,6 +110,17 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         ? fuzzySimilarity(searchData.companyName, candidate.companyName)
         : 0;
 
+    // Company name prefix match — catches speech-to-text misspellings
+    // e.g. "Diversetec" and "DIVERSATEK" share prefix "diver"
+    const companyNamePrefixMatch = (() => {
+        if (!searchData.companyName || !candidate.companyName) return false;
+        const searchNorm = normalizeText(searchData.companyName);
+        const candidateNorm = normalizeText(candidate.companyName);
+        if (searchNorm.length < 4 || candidateNorm.length < 4) return false;
+        const prefixLen = Math.min(5, searchNorm.length, candidateNorm.length);
+        return searchNorm.slice(0, prefixLen) === candidateNorm.slice(0, prefixLen);
+    })();
+
     // Cross-matching: Check if locationName matches companyName (customer might say company as location)
     const locationNameMatchesCompany = Boolean(
         searchData.locationName &&
@@ -141,11 +158,24 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         : 0;
     const nameMatch = nameSimilarity > 0.6;
 
-    // Count how many locations this contact/company has
-    const companyId = candidate.companyName ? 
-        allCandidates.find(c => c.companyName === candidate.companyName)?.locationId : null;
-    const locationsForCompany = companyId ? 
-        allCandidates.filter(c => c.companyName === candidate.companyName).length : 0;
+    // Count how many unique locations are associated with this company name
+    const locationsForCompany = candidate.companyName
+        ? new Set(
+            allCandidates
+                .filter(c => c.companyName === candidate.companyName && c.locationId)
+                .map(c => c.locationId)
+        ).size
+        : 0;
+
+    // Count how many unique locations are tied to the exact incoming phone.
+    // If a phone belongs to multiple locations, phone-only matching is ambiguous.
+    const locationsForExactPhone = normalizedSearchPhone
+        ? new Set(
+            allCandidates
+                .filter((c) => normalizePhone(c.contactPhone) === normalizedSearchPhone && c.locationId)
+                .map((c) => c.locationId)
+        ).size
+        : 0;
 
     // Classify into tiers
     let tier = 3; // Default: low confidence
@@ -169,12 +199,17 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         // Very high company name similarity + address match
         tier = 1;
         tierReason = 'company_fuzzy_and_address_match';
-    } else if (phoneExact && locationsForCompany === 1) {
+    } else if (companyNamePrefixMatch && addressMatch) {
+        // Company name shares prefix (first 5 chars) + address match
+        // Handles speech-to-text misspellings like "Diversetec" -> "DIVERSATEK"
+        tier = 1;
+        tierReason = 'company_prefix_and_address_match';
+    } else if (phoneExact && locationsForExactPhone === 1) {
         tier = 1;
         tierReason = 'phone_match_single_location';
     } else if (phoneExact) {
-        tier = 1;
-        tierReason = 'phone_match';
+        tier = 2;
+        tierReason = 'phone_match_multiple_locations';
     } else if (locationNameExact && companyNameExact) {
         tier = 1;
         tierReason = 'location_and_company_exact';
@@ -195,8 +230,8 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
     } else if (companyNameExact && locationsForCompany === 1) {
         tier = 2;
         tierReason = 'company_match_single_location';
-    } else if (companyNameFuzzy > 0.8 && addressMatch) {
-        // Good company match + address (but not high enough for Tier 1)
+    } else if (companyNameFuzzy > 0.6 && addressMatch) {
+        // Allow common transcription/spelling drift when address is a strong match
         tier = 2;
         tierReason = 'company_fuzzy_and_address';
     } else if (locationNameMatchesCompany && addressMatch) {
@@ -224,6 +259,7 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         phoneExact,
         locationNameExact,
         companyNameExact,
+        companyNamePrefixMatch,
         locationNameMatchesCompany,
         companyNameMatchesLocation,
         addressMatch,
@@ -232,7 +268,8 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         companySimilarity: companyNameFuzzy,
         nameSimilarity,
         nameMatch,
-        locationsForCompany
+        locationsForCompany,
+        locationsForExactPhone
     };
 };
 
@@ -359,11 +396,15 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         taskLabels.push('name');
     }
     if (searchData.locationName) {
-        tasks.push(searchByLocationName(authToken, searchData.locationName));
+        // Always search with a truncated prefix (first 5 chars) so the API returns
+        // broader results that catch speech-to-text misspellings (e.g. "Diversetec" -> "DIVERSATEK").
+        // Our fuzzy scoring in determineMatchQuality handles narrowing the candidate pool.
+        const locationPrefix = getSearchPrefix(searchData.locationName);
+        tasks.push(searchByLocationName(authToken, locationPrefix));
         taskLabels.push('location_name');
         
         // Also search as company name (customer might say company instead of location)
-        tasks.push(searchByCompanyName(authToken, searchData.locationName));
+        tasks.push(searchByCompanyName(authToken, locationPrefix));
         taskLabels.push('location_name_as_company');
     }
     if (searchData.address) {
@@ -371,11 +412,12 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         taskLabels.push('address');
     }
     if (searchData.companyName) {
-        tasks.push(searchByCompanyName(authToken, searchData.companyName));
+        const companyPrefix = getSearchPrefix(searchData.companyName);
+        tasks.push(searchByCompanyName(authToken, companyPrefix));
         taskLabels.push('company_name');
         
         // Also search as location name (customer might say location instead of company)
-        tasks.push(searchByLocationName(authToken, searchData.companyName));
+        tasks.push(searchByLocationName(authToken, companyPrefix));
         taskLabels.push('company_name_as_location');
     }
 

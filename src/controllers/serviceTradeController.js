@@ -139,13 +139,18 @@ const getCustomerByPhone = async (fromPhoneNumber, agentId) => {
             }
         }));
         
+        if (locations.length > 1) {
+            console.log(`⚠️ Contact has ${locations.length} locations — callers should use 'locations' array, not 'locationId'`);
+        }
+
         return {
             name: serviceTradeData.firstName + ' ' + serviceTradeData.lastName,
             phone: serviceTradeData.phone,
             email: serviceTradeData.email,
             customerId: serviceTradeData.id,
             locations: locations,
-            // Keep backward compatibility - include first location as default
+            // DEPRECATED: locationId is the first match and may be WRONG for multi-location contacts.
+            // Callers should iterate over 'locations' instead.
             locationId: serviceTradeData.locations[0].id,
             companyId: serviceTradeData.company?.id || null,
             address: serviceTradeData.locations[0].address.street + ', ' + 
@@ -185,6 +190,10 @@ const getCustomerByPhone = async (fromPhoneNumber, agentId) => {
             }
         }));
         
+        if (locations.length > 1) {
+            console.log(`⚠️ Contact has ${locations.length} locations — callers should use 'locations' array, not 'locationId'`);
+        }
+
         const primaryContact = locationContactData[0].primaryContact || null;
         return {
             name: locationContactData[0].name || (primaryContact ? `${primaryContact.firstName} ${primaryContact.lastName}` : ''),
@@ -192,7 +201,8 @@ const getCustomerByPhone = async (fromPhoneNumber, agentId) => {
             email: primaryContact?.email || '',
             customerId: primaryContact?.id || null,
             locations: locations,
-            // Keep backward compatibility - include first location as default
+            // DEPRECATED: locationId is the first match and may be WRONG for multi-location contacts.
+            // Callers should iterate over 'locations' instead.
             locationId: locationContactData[0].id,
             companyId: locationContactData[0].company?.id || null,
             address: locationContactData[0].address.street + ', ' + 
@@ -243,6 +253,8 @@ const getJobsByLocation = async (locationId, agentId, status) => {
 
 /**
  * Get jobs for a customer by phone number (calls customer lookup first)
+ * Queries jobs across ALL locations the contact is associated with to avoid
+ * returning jobs from an arbitrary single location.
  * @param {string} fromPhoneNumber - The phone number to search for
  * @param {string} agentId - The agent ID
  * @param {string} status - The job status filter
@@ -250,17 +262,41 @@ const getJobsByLocation = async (locationId, agentId, status) => {
  * @throws {Error} - If customer or validation fails
  */
 const getJobsByPhone = async (fromPhoneNumber, agentId, status) => {
-    // Step 1: Get customer information first (includes locationId)
+    // Step 1: Get customer information first (includes all locations)
     const customerData = await getCustomerByPhone(fromPhoneNumber, agentId);
     
-    // Step 2: Get jobs using the locationId from customer lookup
-    const jobDetails = await getJobsByLocation(customerData.locationId, agentId, status);
+    // Step 2: Get jobs across ALL locations the contact is associated with
+    const locations = customerData.locations || [];
+    const locationIds = locations.map(loc => loc.id).filter(Boolean);
+    
+    if (locationIds.length === 0) {
+        throw new Error('Customer has no associated locations');
+    }
+
+    const jobPromises = locationIds.map(locId =>
+        getJobsByLocation(locId, agentId, status).catch(err => {
+            console.log(`⚠️ Failed to fetch jobs for location ${locId}:`, err.message);
+            return [];
+        })
+    );
+    const jobArrays = await Promise.all(jobPromises);
+    const allJobs = jobArrays.flat();
+
+    // Deduplicate by jobId in case the same job appears under multiple locations
+    const seen = new Set();
+    const jobDetails = allJobs.filter(job => {
+        if (seen.has(job.jobId)) return false;
+        seen.add(job.jobId);
+        return true;
+    });
     
     return {
         customer: {
             name: customerData.name,
             phone: customerData.phone,
             email: customerData.email,
+            locations: locations,
+            // Backward compat — prefer using 'locations' array
             locationId: customerData.locationId,
             address: customerData.address,
             customerId: customerData.customerId
