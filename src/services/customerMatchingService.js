@@ -77,6 +77,17 @@ const buildCandidate = ({ contact, location, source }) => {
 };
 
 const determineMatchQuality = (candidate, searchData, allCandidates) => {
+    /**
+     * MATCHING PRIORITY ORDER (Tier 1 - Auto-create):
+     * 1. Phone + Address (most reliable for multi-location contacts)
+     * 2. Location Name + Address
+     * 3. Phone (single location only)
+     * 4. Company + Location + Address (requires both to avoid confusion like "Uptown" vs "Intown")
+     * 
+     * Note: Company name + address alone is now Tier 2 due to speech-to-text
+     * confusion with similar names (e.g., "Uptown Suites" vs "Intown Suites")
+     */
+    
     // Phone exact match
     const normalizedSearchPhone = normalizePhone(searchData.phone);
     const normalizedCandidatePhone = normalizePhone(candidate.contactPhone);
@@ -143,13 +154,20 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         ? fuzzySimilarity(searchData.companyName, candidate.locationName)
         : 0;
 
-    // Address match (use lower threshold for more flexibility)
+    // Address match - use stricter threshold when company names could be ambiguous
     let addressSimilarityScore = 0;
     let addressMatch = false;
     if (searchData.address && candidate.address) {
         const candidateAddress = `${candidate.address.street || ''} ${candidate.address.city || ''} ${candidate.address.state || ''} ${candidate.address.postalCode || ''}`.trim();
         addressSimilarityScore = addressSimilarity(searchData.address, candidateAddress);
-        addressMatch = addressSimilarityScore > 0.6; // Lower threshold from 0.8
+        
+        // Use stricter threshold (0.75) when relying on company name to avoid confusion
+        // Use normal threshold (0.6) when we have phone or location name match
+        const hasPhoneOrLocation = (searchData.phone && candidate.contactPhone) || 
+                                   (searchData.locationName && candidate.locationName);
+        const threshold = hasPhoneOrLocation ? 0.6 : 0.75;
+        
+        addressMatch = addressSimilarityScore > threshold;
     }
 
     // Contact name match
@@ -182,43 +200,70 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
     let tierReason = 'no_strong_match';
 
     // Tier 1: High confidence - auto-create job
+    // PRIORITY 1: Phone + Address (most reliable for disambiguation)
     if (phoneExact && addressMatch) {
         tier = 1;
         tierReason = 'phone_and_address_match';
-    } else if (locationNameExact && addressMatch) {
+    } 
+    // PRIORITY 2: Location name + Address
+    else if (locationNameExact && addressMatch) {
         tier = 1;
         tierReason = 'location_name_and_address_match';
     } else if (locationNameMatchesCompany && addressMatch) {
         tier = 1;
         tierReason = 'location_as_company_and_address_match';
-    } else if (companyNameExact && addressMatch) {
-        // Company name + address is high confidence
-        tier = 1;
-        tierReason = 'company_and_address_exact';
-    } else if (companyNameFuzzy > 0.9 && addressMatch) {
-        // Very high company name similarity + address match
-        tier = 1;
-        tierReason = 'company_fuzzy_and_address_match';
-    } else if (companyNamePrefixMatch && addressMatch) {
-        // Company name shares prefix (first 5 chars) + address match
-        // Handles speech-to-text misspellings like "Diversetec" -> "DIVERSATEK"
-        tier = 1;
-        tierReason = 'company_prefix_and_address_match';
-    } else if (phoneExact && locationsForExactPhone === 1) {
+    } 
+    // PRIORITY 3: Single phone match (no ambiguity)
+    else if (phoneExact && locationsForExactPhone === 1) {
         tier = 1;
         tierReason = 'phone_match_single_location';
-    } else if (phoneExact) {
-        tier = 2;
-        tierReason = 'phone_match_multiple_locations';
-    } else if (locationNameExact && companyNameExact) {
+    }
+    // PRIORITY 4: Company name + Address (moved DOWN because of speech-to-text confusion like "Uptown" vs "Intown")
+    else if (companyNameExact && addressMatch && locationNameExact) {
+        // Require BOTH company AND location name to match with address for tier 1
+        // This prevents confusion between similar company names
+        tier = 1;
+        tierReason = 'company_location_and_address_exact';
+    } else if (companyNameFuzzy > 0.95 && addressMatch && locationNameExact) {
+        // Very high company name similarity (0.95+) + location name + address
+        tier = 1;
+        tierReason = 'company_fuzzy_location_and_address_match';
+    } else if (companyNamePrefixMatch && addressMatch && locationNameExact) {
+        // Company name prefix + location name + address
+        tier = 1;
+        tierReason = 'company_prefix_location_and_address_match';
+    }
+    // Company name + address alone is now Tier 2 (too risky with similar names)
+    else if (locationNameExact && companyNameExact) {
         tier = 1;
         tierReason = 'location_and_company_exact';
     } else if (locationNameMatchesCompany && locationsForCompany === 1) {
         tier = 1;
         tierReason = 'location_as_company_single_location';
+    } else if (phoneExact && addressSimilarityScore > 0.5) {
+        // Phone match with decent address similarity (even if not perfect match)
+        // This catches cases where address might have minor differences but phone is exact
+        tier = 1;
+        tierReason = 'phone_match_with_address_similarity';
+    } else if (phoneExact) {
+        tier = 2;
+        tierReason = 'phone_match_multiple_locations';
     }
     // Tier 2: Medium confidence - create with note
-    else if (locationNameExact) {
+    else if (companyNameExact && addressMatch) {
+        // Company name + address WITHOUT location name confirmation
+        // Moved to tier 2 due to similar company names (Uptown vs Intown)
+        tier = 2;
+        tierReason = 'company_and_address_exact_no_location';
+    } else if (companyNameFuzzy > 0.9 && addressMatch) {
+        // Very high company similarity + address but no location name
+        tier = 2;
+        tierReason = 'company_fuzzy_and_address_no_location';
+    } else if (companyNamePrefixMatch && addressMatch) {
+        // Company prefix + address but no location name
+        tier = 2;
+        tierReason = 'company_prefix_and_address_no_location';
+    } else if (locationNameExact) {
         tier = 2;
         tierReason = 'location_name_exact';
     } else if (locationNameMatchesCompany) {
