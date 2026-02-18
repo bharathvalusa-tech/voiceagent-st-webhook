@@ -268,6 +268,21 @@ router.post('/retell', async (req, res) => {
                 }
             }
 
+            // Extract serviceLineId from collected_dynamic_variables or extracted data
+            // Maps emergency type to service line: Fire Alarm = 1, Sprinkler = 5
+            let serviceLineId = null;
+            const rawServiceLineId =
+                sourceDynamicVars?.serviceLineId ||
+                sourceExtracted?.serviceLineId ||
+                sourceExtracted?.service_line_id ||
+                null;
+            if (rawServiceLineId) {
+                const parsed = Number(rawServiceLineId);
+                if (!Number.isNaN(parsed) && parsed > 0) {
+                    serviceLineId = parsed;
+                }
+            }
+
             return {
                 callerPhone,
                 callerPhoneFallback: callerPhoneFromExtracted,
@@ -280,7 +295,8 @@ router.post('/retell', async (req, res) => {
                 locationName,
                 companyName,
                 issueDescription,
-                techIds
+                techIds,
+                serviceLineId
             };
         };
 
@@ -355,7 +371,8 @@ router.post('/retell', async (req, res) => {
             locationName,
             companyName,
             issueDescription,
-            techIds
+            techIds,
+            serviceLineId
         } = extractedFields;
 
         if (techIds.length > 0) {
@@ -363,6 +380,15 @@ router.post('/retell', async (req, res) => {
                 callId,
                 agentId,
                 techIds,
+                source: Object.keys(resolvedDynamicVars).length > 0 ? 'collected_dynamic_variables' : 'extracted_data'
+            });
+        }
+
+        if (serviceLineId) {
+            logWithContext('info', 'Extracted serviceLineId from call', {
+                callId,
+                agentId,
+                serviceLineId,
                 source: Object.keys(resolvedDynamicVars).length > 0 ? 'collected_dynamic_variables' : 'extracted_data'
             });
         }
@@ -637,7 +663,8 @@ router.post('/retell', async (req, res) => {
                 description: jobDescription,
                 callerPhoneNumber: matchedPhone,
                 call_id: callId,
-                techIds: techIds
+                techIds: techIds,
+                serviceLineId: serviceLineId
             },
             agentId
         );
@@ -651,6 +678,7 @@ router.post('/retell', async (req, res) => {
             tierReason: selectedCandidate.tierReason,
             jobId: jobResult?.jobId,
             techIds: techIds.length > 0 ? techIds : null,
+            serviceLineId: serviceLineId || null,
             addressValidated: validatedAddress ? true : false
         });
 
