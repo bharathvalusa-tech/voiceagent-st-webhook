@@ -37,18 +37,20 @@ const logWithContext = (level, message, context = {}) => {
     }
 };
 
-const buildJobDescription = (issueDescription, callerName) => {
+const buildJobDescription = (issueDescription, callerName, callerPhone) => {
     const name = (callerName || '').trim() || 'Unknown person';
+    const phone = (callerPhone || '').trim() || null;
+    const namePart = phone ? `${name} (${phone})` : name;
     const rawDescription = (issueDescription || '').trim();
     if (!rawDescription) {
-        return `[AFTER HOURS]: ${name} reported an issue.`;
+        return `[AFTER HOURS]: ${namePart} reported an issue.`;
     }
 
     const replaced = callerName
         ? rawDescription.replace(/\b(caller|customer)\b/gi, name)
         : rawDescription;
 
-    return `[AFTER HOURS]: ${name} reported ${replaced}`;
+    return `[AFTER HOURS]: ${namePart} reported ${replaced}`;
 };
 
 const validateCandidateAgainstRetellData = ({ candidate, searchContext }) => {
@@ -655,7 +657,8 @@ router.post('/retell', async (req, res) => {
             });
         }
 
-        const jobDescription = buildJobDescription(issueDescription, callerName);
+        const callerPhoneForDescription = extractedFields.callerPhone || call?.from_number || call?.fromNumber || null;
+        const jobDescription = buildJobDescription(issueDescription, callerName, callerPhoneForDescription);
 
         const jobResult = await createJob(
             {
