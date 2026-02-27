@@ -177,24 +177,31 @@ router.post('/retell', async (req, res) => {
                 sourceExtracted?.street_address ||
                 sourceExtracted?.street ||
                 sourceExtracted?.address1 ||
+                sourceDynamicVars?.street ||
+                sourceDynamicVars?.address_line1 ||
+                sourceDynamicVars?.addressLine1 ||
                 null;
 
             const addressCity =
                 sourceExtracted?.city ||
                 sourceExtracted?.address_city ||
                 sourceExtracted?.addressCity ||
+                sourceDynamicVars?.city ||
                 null;
 
             const addressState =
                 sourceExtracted?.state ||
                 sourceExtracted?.address_state ||
                 sourceExtracted?.addressState ||
+                sourceDynamicVars?.state ||
                 null;
 
             const addressPostal =
                 sourceExtracted?.postal_code ||
                 sourceExtracted?.postalCode ||
                 sourceExtracted?.zip ||
+                sourceDynamicVars?.postalCode ||
+                sourceDynamicVars?.postal_code ||
                 null;
 
             const rawAddress =
@@ -202,6 +209,10 @@ router.post('/retell', async (req, res) => {
                 sourceExtracted?.address ||
                 sourceExtracted?.location_address ||
                 sourceExtracted?.raw_input ||
+                sourceExtracted?.serviceAddress ||
+                sourceDynamicVars?.validated_address ||
+                sourceDynamicVars?.serviceAddress ||
+                sourceDynamicVars?.raw_input ||
                 buildAddressQuery({
                     line1: addressLine1,
                     city: addressCity,
