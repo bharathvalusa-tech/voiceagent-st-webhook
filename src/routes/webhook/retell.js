@@ -6,8 +6,42 @@ const { validateAddress, buildAddressQuery } = require('../../services/googleMap
 const { findCustomerWithConfidence } = require('../../services/customerMatchingService');
 const { createJob } = require('../../controllers/serviceTradeController');
 const supabaseService = require('../../services/supabaseService');
-
 const router = express.Router();
+
+const forwardToApiGateway = async (rawBodyStr, parsedBody, signatureHeader) => {
+    const apiGatewayUrl = process.env.API_GATEWAY_URL;
+    if (!apiGatewayUrl) return;
+
+    const eventType = parsedBody?.event || parsedBody?.event_type || '';
+
+    // Only forward call_started, call_ended, and call_analyzed events
+    if (eventType !== 'call_started' && eventType !== 'call_ended' && eventType !== 'call_analyzed') return;
+
+    // Use the raw body string so the x-retell-signature HMAC remains valid
+    // on the receiving Lambda (it verifies against the normalized original payload)
+    const bodyStr = rawBodyStr || JSON.stringify(parsedBody);
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        const response = await fetch(apiGatewayUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-retell-signature': signatureHeader || ''
+            },
+            body: bodyStr,
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+        console.log(`[API_GATEWAY] Forwarded ${eventType} event, status: ${response.status}`);
+    } catch (error) {
+        // Swallow errors — forward failures must never block the main webhook response
+        console.error(`[API_GATEWAY] Error forwarding webhook: ${error.message}`);
+    }
+};
 
 const extractPayload = (body) => {
     const eventType = body.event || body.event_type || body.type || body.webhook_event;
@@ -132,6 +166,18 @@ const validateCandidateAgainstRetellData = ({ candidate, searchContext }) => {
 
 router.post('/retell', async (req, res) => {
     try {
+        // Forward to API gateway synchronously — must be awaited so it completes
+        // within the serverless request lifecycle before the container freezes.
+        // Pass req.rawBody (captured before Express JSON parsing) so the original payload
+        // bytes are forwarded, keeping the x-retell-signature HMAC verifiable on the Lambda.
+        const signatureHeader = req.headers['x-retell-signature'] || req.headers['X-Retell-Signature'] || '';
+        try {
+            await forwardToApiGateway(req.rawBody || null, req.body, signatureHeader);
+        } catch (fwdErr) {
+            // Isolated guard — forwarding errors must never affect the main response
+            console.error(`[API_GATEWAY] Unexpected forwarding error (ignored): ${fwdErr.message}`);
+        }
+
         const { eventType, call, analysis, extracted, dynamicVars } = extractPayload(req.body || {});
 
         if (eventType && eventType !== 'call_analyzed') {

@@ -23,7 +23,14 @@ app.use(cors({
 }));
 
 // Middleware
-app.use(express.json());
+// Capture raw body buffer before JSON parsing — needed to forward the exact
+// original payload to the API gateway so the x-retell-signature HMAC can be
+// verified against the same bytes Retell originally signed.
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf.toString('utf8');
+    }
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(logger);
 
