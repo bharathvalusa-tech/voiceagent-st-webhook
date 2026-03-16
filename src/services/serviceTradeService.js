@@ -117,6 +117,32 @@ class ServiceTradeService {
         }
     }
 
+    async searchLocations(authToken, searchQuery) {
+        try {
+            const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+            const response = await fetch(
+                `${this.baseUrl}/location?search=${encodeURIComponent(searchQuery)}`,
+                {
+                    method: "GET",
+                    headers: {
+                        "Cookie": cookieValue,
+                        "Content-Type": "application/json"
+                    }
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+            }
+
+            const { data } = await response.json();
+            return Array.isArray(data?.locations) ? data.locations : [];
+        } catch (error) {
+            console.error('Error searching locations from ServiceTrade:', error);
+            throw error;
+        }
+    }
+
     async searchCompaniesByName(authToken, nameQuery) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;

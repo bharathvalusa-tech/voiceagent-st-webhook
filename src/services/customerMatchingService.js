@@ -48,6 +48,84 @@ const getSearchPrefix = (name, prefixLen = 5) => {
     return trimmed.slice(0, prefixLen);
 };
 
+const STREET_SUFFIX_TOKENS = new Set([
+    'street', 'st', 'avenue', 'ave', 'road', 'rd', 'drive', 'dr', 'boulevard', 'blvd',
+    'lane', 'ln', 'court', 'ct', 'circle', 'cir', 'parkway', 'pkwy', 'terrace', 'ter',
+    'place', 'pl', 'way', 'highway', 'hwy'
+]);
+
+const UNIT_TOKENS = new Set([
+    'unit', 'suite', 'ste', 'apt', 'apartment', 'floor', 'fl', 'building', 'bldg'
+]);
+
+const DIRECTIONAL_TOKENS = new Set([
+    'n', 's', 'e', 'w', 'north', 'south', 'east', 'west'
+]);
+
+const dedupeStrings = (values) => [...new Set(values.filter(Boolean))];
+
+const dedupeLocationsById = (locations) => {
+    const uniqueLocations = new Map();
+    locations.forEach((location) => {
+        const key = location?.id || `${location?.name || 'unknown'}-${location?.company?.id || 'unknown'}`;
+        if (!uniqueLocations.has(key)) {
+            uniqueLocations.set(key, location);
+        }
+    });
+    return Array.from(uniqueLocations.values());
+};
+
+const buildAddressSearchQueries = (address) => {
+    if (!address) return [];
+
+    const rawAddress = String(address).trim();
+    if (!rawAddress) return [];
+
+    const [streetSegment] = rawAddress.split(',').map((segment) => segment.trim()).filter(Boolean);
+    const normalizedStreetTokens = normalizeText(streetSegment || rawAddress).split(' ').filter(Boolean);
+
+    const houseNumberIndex = normalizedStreetTokens.findIndex((token) => /^\d+[a-z]?$/i.test(token));
+    if (houseNumberIndex === -1) {
+        return dedupeStrings([streetSegment, rawAddress]);
+    }
+
+    const houseNumber = normalizedStreetTokens[houseNumberIndex];
+    const streetTokens = normalizedStreetTokens
+        .slice(houseNumberIndex + 1)
+        .filter((token) => !UNIT_TOKENS.has(token) && !/^\d+[a-z]?$/i.test(token));
+
+    const suffixIndex = streetTokens.findIndex((token) => STREET_SUFFIX_TOKENS.has(token));
+    const coreStreetTokens = (suffixIndex === -1 ? streetTokens : streetTokens.slice(0, suffixIndex)).slice(0, 3);
+    const streetTokensWithoutDirectional = coreStreetTokens.filter(
+        (token, index) => !(index === 0 && DIRECTIONAL_TOKENS.has(token))
+    );
+
+    const shortQueries = [];
+    if (coreStreetTokens.length > 0) {
+        shortQueries.push(`${houseNumber} ${coreStreetTokens.join(' ')}`);
+    }
+    if (streetTokensWithoutDirectional.length > 0) {
+        shortQueries.push(`${houseNumber} ${streetTokensWithoutDirectional.join(' ')}`);
+    }
+
+    return dedupeStrings([
+        ...shortQueries,
+        streetSegment,
+        rawAddress
+    ]);
+};
+
+const hasAddressQueryMatch = (leftAddress, rightAddress) => {
+    const leftQueries = new Set(buildAddressSearchQueries(leftAddress).map((query) => normalizeText(query)));
+    const rightQueries = new Set(buildAddressSearchQueries(rightAddress).map((query) => normalizeText(query)));
+
+    if (leftQueries.size === 0 || rightQueries.size === 0) {
+        return false;
+    }
+
+    return [...leftQueries].some((query) => rightQueries.has(query));
+};
+
 const addressSimilarity = (a, b) => {
     const aNorm = normalizeText(a);
     const bNorm = normalizeText(b);
@@ -157,9 +235,11 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
     // Address match - use stricter threshold when company names could be ambiguous
     let addressSimilarityScore = 0;
     let addressMatch = false;
+    let addressQueryMatch = false;
     if (searchData.address && candidate.address) {
         const candidateAddress = `${candidate.address.street || ''} ${candidate.address.city || ''} ${candidate.address.state || ''} ${candidate.address.postalCode || ''}`.trim();
         addressSimilarityScore = addressSimilarity(searchData.address, candidateAddress);
+        addressQueryMatch = hasAddressQueryMatch(searchData.address, candidateAddress);
         
         // Use stricter threshold (0.75) when relying on company name to avoid confusion
         // Use normal threshold (0.6) when we have phone or location name match
@@ -167,7 +247,7 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
                                    (searchData.locationName && candidate.locationName);
         const threshold = hasPhoneOrLocation ? 0.6 : 0.75;
         
-        addressMatch = addressSimilarityScore > threshold;
+        addressMatch = addressQueryMatch || addressSimilarityScore > threshold;
     }
 
     // Contact name match
@@ -250,7 +330,10 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         tierReason = 'phone_match_multiple_locations';
     }
     // Tier 2: Medium confidence - create with note
-    else if (companyNameExact && addressMatch) {
+    else if (addressQueryMatch) {
+        tier = 2;
+        tierReason = 'address_query_match';
+    } else if (companyNameExact && addressMatch) {
         // Company name + address WITHOUT location name confirmation
         // Moved to tier 2 due to similar company names (Uptown vs Intown)
         tier = 2;
@@ -308,6 +391,7 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         locationNameMatchesCompany,
         companyNameMatchesLocation,
         addressMatch,
+        addressQueryMatch,
         addressSimilarity: addressSimilarityScore,
         locationSimilarity: locationNameFuzzy,
         companySimilarity: companyNameFuzzy,
@@ -387,9 +471,27 @@ const searchByName = async (authToken, name) => {
 };
 
 const searchByLocationName = async (authToken, locationName) => {
-    const locations = await serviceTradeService.searchLocationsByName(authToken, locationName);
+    const directLocations = dedupeLocationsById(
+        await serviceTradeService.searchLocations(authToken, locationName)
+    );
+    if (directLocations.length > 0) {
+        logMatchEvent('location_name_search_results', {
+            locationName,
+            searchMode: 'direct_search',
+            locationsCount: directLocations.length,
+            locationIds: directLocations.map((location) => location.id)
+        });
+        return directLocations.map((location) =>
+            buildCandidate({ contact: location.primaryContact || null, location, source: 'location_name' })
+        );
+    }
+
+    const fallbackQuery = getSearchPrefix(locationName);
+    const locations = await serviceTradeService.searchLocationsByName(authToken, fallbackQuery);
     logMatchEvent('location_name_search_results', {
         locationName,
+        searchMode: 'legacy_name_fallback',
+        fallbackQuery,
         locationsCount: locations.length,
         locationIds: locations.map((location) => location.id)
     });
@@ -397,13 +499,38 @@ const searchByLocationName = async (authToken, locationName) => {
 };
 
 const searchByAddress = async (authToken, address) => {
+    const queries = buildAddressSearchQueries(address);
+
+    for (const query of queries) {
+        const directLocations = dedupeLocationsById(
+            await serviceTradeService.searchLocations(authToken, query)
+        );
+        if (directLocations.length > 0) {
+            logMatchEvent('address_search_results', {
+                address,
+                searchMode: 'direct_search',
+                queryUsed: query,
+                attemptedQueries: queries,
+                locationsCount: directLocations.length,
+                locationIds: directLocations.map((location) => location.id)
+            });
+            return directLocations.map((location) =>
+                buildCandidate({ contact: location.primaryContact || null, location, source: 'address_direct' })
+            );
+        }
+    }
+
     const locations = await serviceTradeService.searchLocationsByAddress(authToken, address);
     logMatchEvent('address_search_results', {
         address,
+        searchMode: 'legacy_scan_fallback',
+        attemptedQueries: queries,
         locationsCount: locations.length,
         locationIds: locations.map((location) => location.id)
     });
-    return locations.map((location) => buildCandidate({ contact: location.primaryContact || null, location, source: 'address' }));
+    return locations.map((location) =>
+        buildCandidate({ contact: location.primaryContact || null, location, source: 'address_fallback' })
+    );
 };
 
 const searchByCompanyName = async (authToken, companyName) => {
@@ -431,6 +558,8 @@ const searchByCompanyName = async (authToken, companyName) => {
 const findCustomerWithConfidence = async (authToken, searchData) => {
     const tasks = [];
     const taskLabels = [];
+    let addressCandidates = [];
+    let directAddressLocationIds = new Set();
 
     if (searchData.phone) {
         tasks.push(searchByPhone(authToken, searchData.phone));
@@ -441,19 +570,22 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         taskLabels.push('name');
     }
     if (searchData.locationName) {
-        // Always search with a truncated prefix (first 5 chars) so the API returns
-        // broader results that catch speech-to-text misspellings (e.g. "Diversetec" -> "DIVERSATEK").
-        // Our fuzzy scoring in determineMatchQuality handles narrowing the candidate pool.
-        const locationPrefix = getSearchPrefix(searchData.locationName);
-        tasks.push(searchByLocationName(authToken, locationPrefix));
+        tasks.push(searchByLocationName(authToken, searchData.locationName));
         taskLabels.push('location_name');
         
         // Also search as company name (customer might say company instead of location)
+        const locationPrefix = getSearchPrefix(searchData.locationName);
         tasks.push(searchByCompanyName(authToken, locationPrefix));
         taskLabels.push('location_name_as_company');
     }
     if (searchData.address) {
-        tasks.push(searchByAddress(authToken, searchData.address));
+        addressCandidates = await searchByAddress(authToken, searchData.address);
+        directAddressLocationIds = new Set(
+            addressCandidates
+                .filter((candidate) => candidate.source === 'address_direct' && candidate.locationId)
+                .map((candidate) => candidate.locationId)
+        );
+        tasks.push(Promise.resolve(addressCandidates));
         taskLabels.push('address');
     }
     if (searchData.companyName) {
@@ -462,12 +594,24 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         taskLabels.push('company_name');
         
         // Also search as location name (customer might say location instead of company)
-        tasks.push(searchByLocationName(authToken, companyPrefix));
+        tasks.push(searchByLocationName(authToken, searchData.companyName));
         taskLabels.push('company_name_as_location');
     }
 
     const results = await Promise.all(tasks);
-    const candidates = results.flat();
+    let candidates = results.flat();
+
+    if (directAddressLocationIds.size > 0) {
+        candidates = candidates.filter((candidate) =>
+            !candidate.locationId || directAddressLocationIds.has(candidate.locationId)
+        );
+        logMatchEvent('address_primary_filter_applied', {
+            address: searchData.address,
+            retainedLocationIds: Array.from(directAddressLocationIds),
+            candidateCountAfterFilter: candidates.length
+        });
+    }
+
     const deduped = new Map();
 
     candidates.forEach((candidate) => {
@@ -521,6 +665,7 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         locationNameExact: candidate.locationNameExact,
         companyNameExact: candidate.companyNameExact,
         addressMatch: candidate.addressMatch,
+        addressQueryMatch: candidate.addressQueryMatch,
         addressSimilarity: candidate.addressSimilarity,
         locationSimilarity: candidate.locationSimilarity,
         companySimilarity: candidate.companySimilarity
