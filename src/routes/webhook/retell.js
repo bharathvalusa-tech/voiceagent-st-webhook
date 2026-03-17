@@ -520,6 +520,63 @@ router.post('/retell', async (req, res) => {
             });
         }
 
+        // Load job configuration (including emergency behavior)
+        const jobConfig = await supabaseService.getJobConfig(agentId);
+        const createEmergencyJobs =
+            jobConfig && typeof jobConfig.create_emergency_jobs === 'boolean'
+                ? jobConfig.create_emergency_jobs
+                : true;
+
+        // Determine if this call is marked as an emergency.
+        // We look in dynamic variables first (highest priority), then extracted data, then analysis.
+        const normalizeBool = (value) => {
+            if (value === null || value === undefined) return null;
+            if (typeof value === 'boolean') return value;
+            if (typeof value === 'number') {
+                if (value === 1) return true;
+                if (value === 0) return false;
+            }
+            if (typeof value === 'string') {
+                const v = value.trim().toLowerCase();
+                if (['true', 'yes', 'y', '1'].includes(v)) return true;
+                if (['false', 'no', 'n', '0'].includes(v)) return false;
+            }
+            return null;
+        };
+
+        const emergencySources = [
+            resolvedDynamicVars?.isEmergency ?? resolvedDynamicVars?.is_emergency,
+            resolvedExtracted?.isEmergency ?? resolvedExtracted?.is_emergency,
+            resolvedAnalysis?.isEmergency ?? resolvedAnalysis?.is_emergency
+        ];
+
+        let isEmergencyFlag = null;
+        for (const sourceVal of emergencySources) {
+            const normalized = normalizeBool(sourceVal);
+            if (normalized !== null) {
+                isEmergencyFlag = normalized;
+                break;
+            }
+        }
+
+        // If the call is explicitly marked as emergency and config forbids creating emergency jobs,
+        // we skip job creation entirely. If Retell doesn't send any emergency flag at all,
+        // or sends it as false, we proceed as normal.
+        if (isEmergencyFlag === true && !createEmergencyJobs) {
+            logWithContext('info', 'Emergency job creation skipped due to configuration', {
+                callId,
+                agentId,
+                createEmergencyJobs,
+                emergencyFlagSourcePresent: true
+            });
+
+            return res.status(200).json({
+                status: 'skipped',
+                reason: 'emergency_jobs_disabled',
+                message: 'Job not created because call is marked as emergency and emergency jobs are disabled in configuration'
+            });
+        }
+
         const authToken = tokenData[0].auth_token;
 
         const buildSearchData = (phone) => {
