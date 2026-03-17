@@ -555,6 +555,30 @@ const searchByCompanyName = async (authToken, companyName) => {
     );
 };
 
+const narrowDirectAddressCandidates = (tieredCandidates, directAddressLocationIds) => {
+    if (directAddressLocationIds.size <= 1) {
+        return tieredCandidates;
+    }
+
+    const corroboratedLocationIds = new Set(
+        tieredCandidates
+            .filter((candidate) => directAddressLocationIds.has(candidate.locationId))
+            .filter((candidate) =>
+                candidate.locationNameExact ||
+                candidate.companyNameExact ||
+                candidate.locationNameMatchesCompany ||
+                candidate.companyNameMatchesLocation
+            )
+            .map((candidate) => candidate.locationId)
+    );
+
+    if (corroboratedLocationIds.size !== 1) {
+        return tieredCandidates;
+    }
+
+    return tieredCandidates.filter((candidate) => corroboratedLocationIds.has(candidate.locationId));
+};
+
 const findCustomerWithConfidence = async (authToken, searchData) => {
     const tasks = [];
     const taskLabels = [];
@@ -628,8 +652,22 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         ...determineMatchQuality(candidate, searchData, allCandidates)
     }));
 
+    const narrowedTieredCandidates = narrowDirectAddressCandidates(
+        tieredCandidates,
+        directAddressLocationIds
+    );
+
+    if (narrowedTieredCandidates.length !== tieredCandidates.length) {
+        logMatchEvent('address_direct_tiebreak_applied', {
+            address: searchData.address,
+            retainedLocationIds: [...new Set(narrowedTieredCandidates.map((candidate) => candidate.locationId).filter(Boolean))],
+            candidateCountBeforeTiebreak: tieredCandidates.length,
+            candidateCountAfterTiebreak: narrowedTieredCandidates.length
+        });
+    }
+
     // Sort by tier (1 = best), then by match quality within tier
-    tieredCandidates.sort((a, b) => {
+    narrowedTieredCandidates.sort((a, b) => {
         // Sort by tier first (lower tier number = higher priority)
         if (a.tier !== b.tier) return a.tier - b.tier;
 
@@ -654,7 +692,7 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         return phoneSort;
     });
 
-    const topCandidates = tieredCandidates.slice(0, 5).map((candidate) => ({
+    const topCandidates = narrowedTieredCandidates.slice(0, 5).map((candidate) => ({
         locationId: candidate.locationId,
         locationName: candidate.locationName,
         companyName: candidate.companyName,
@@ -673,13 +711,13 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
 
     logMatchEvent('matching_summary', {
         searchData,
-        candidateCount: tieredCandidates.length,
-        tier1Count: tieredCandidates.filter(c => c.tier === 1).length,
-        tier2Count: tieredCandidates.filter(c => c.tier === 2).length,
-        tier3Count: tieredCandidates.filter(c => c.tier === 3).length,
+        candidateCount: narrowedTieredCandidates.length,
+        tier1Count: narrowedTieredCandidates.filter(c => c.tier === 1).length,
+        tier2Count: narrowedTieredCandidates.filter(c => c.tier === 2).length,
+        tier3Count: narrowedTieredCandidates.filter(c => c.tier === 3).length,
         topCandidates
     });
-    return tieredCandidates;
+    return narrowedTieredCandidates;
 };
 
 module.exports = {
