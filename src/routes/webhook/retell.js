@@ -5,6 +5,7 @@ const retellService = require('../../services/retellService');
 const { validateAddress, buildAddressQuery } = require('../../services/googleMapsService');
 const { findCustomerWithConfidence } = require('../../services/customerMatchingService');
 const { createJob } = require('../../controllers/serviceTradeController');
+const emailNotificationService = require('../../services/emailNotificationService');
 const supabaseService = require('../../services/supabaseService');
 const router = express.Router();
 
@@ -87,6 +88,64 @@ const buildJobDescription = (issueDescription, callerName, callerPhone) => {
     return `[AFTER HOURS]: ${namePart} reported ${replaced}`;
 };
 
+const normalizeBool = (value) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') {
+        if (value === 1) return true;
+        if (value === 0) return false;
+    }
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (['true', 'yes', 'y', '1'].includes(normalized)) return true;
+        if (['false', 'no', 'n', '0'].includes(normalized)) return false;
+    }
+    return null;
+};
+
+const buildNotificationContext = ({
+    call,
+    callId,
+    agentId,
+    callerName,
+    callerPhone,
+    serviceAddress,
+    locationName,
+    companyName,
+    issueDescription,
+    callSummary,
+    emergencyType,
+    isEmergencyFlag,
+    serviceLineId
+}) => ({
+    callId,
+    agentId,
+    customerName: callerName || 'Unknown Caller',
+    callerPhone: callerPhone || call?.from_number || call?.fromNumber || 'Not provided',
+    serviceAddress: serviceAddress || 'Not provided',
+    locationName: locationName || null,
+    companyName: companyName || null,
+    issueDescription: issueDescription || callSummary || 'Service request from call',
+    callSummary: callSummary || issueDescription || null,
+    emergencyType: emergencyType || null,
+    priority: isEmergencyFlag ? 'Emergency' : 'Non-Emergency',
+    serviceLineId: serviceLineId || null,
+    timestamp: call?.start_timestamp || Date.now()
+});
+
+const buildValidationSummary = (validation) => {
+    if (!validation || !validation.checks) return null;
+
+    const checks = validation.checks;
+    return [
+        `addressMatches=${Boolean(checks.addressMatches)}`,
+        `companyMatches=${Boolean(checks.companyMatches)}`,
+        `locationMatches=${Boolean(checks.locationMatches)}`,
+        `phoneMatches=${Boolean(checks.phoneMatches)}`,
+        `locationsForExactPhone=${checks.locationsForExactPhone || 0}`
+    ].join(', ');
+};
+
 const validateCandidateAgainstRetellData = ({ candidate, searchContext }) => {
     const hasAddressInput = Boolean(searchContext.addressForMatching);
     const hasCompanyInput = Boolean(searchContext.companyName);
@@ -165,6 +224,50 @@ const validateCandidateAgainstRetellData = ({ candidate, searchContext }) => {
 };
 
 router.post('/retell', async (req, res) => {
+    let serviceTradeSettings = null;
+    let notificationBase = null;
+    let callId = null;
+    let agentId = null;
+
+    const respondWithNotification = async (body, notification = null) => {
+        if (notification?.outcome !== 'job_created') {
+            return res.status(200).json(body);
+        }
+
+        if (serviceTradeSettings && notificationBase && notification?.outcome) {
+            try {
+                const emailResult = await emailNotificationService.sendJobNotification({
+                    settings: serviceTradeSettings,
+                    outcome: notification.outcome,
+                    details: {
+                        ...notificationBase,
+                        authData: serviceTradeSettings.auth_data || {},
+                        ...notification.details
+                    }
+                });
+
+                if (emailResult.sent) {
+                    logWithContext('info', 'Notification email sent', {
+                        callId,
+                        agentId,
+                        outcome: notification.outcome,
+                        recipients: emailResult.to,
+                        cc: emailResult.cc
+                    });
+                }
+            } catch (emailError) {
+                logWithContext('error', 'Failed to send notification email', {
+                    callId,
+                    agentId,
+                    outcome: notification.outcome,
+                    error: emailError.message
+                });
+            }
+        }
+
+        return res.status(200).json(body);
+    };
+
     try {
         // Forward to API gateway synchronously — must be awaited so it completes
         // within the serverless request lifecycle before the container freezes.
@@ -184,8 +287,8 @@ router.post('/retell', async (req, res) => {
             return res.status(200).json({ status: 'ignored', message: 'Event not call_analyzed' });
         }
 
-        const agentId = call?.agent_id || extracted?.agent_id || req.body?.agent_id;
-        const callId = call?.call_id || call?.id || req.body?.call_id || extracted?.call_id;
+        agentId = call?.agent_id || extracted?.agent_id || req.body?.agent_id;
+        callId = call?.call_id || call?.id || req.body?.call_id || extracted?.call_id;
         if (!agentId) {
             logWithContext('error', 'Missing agent_id in webhook payload', { callId });
             return res.status(200).json({
@@ -284,8 +387,22 @@ router.post('/retell', async (req, res) => {
             const issueDescription =
                 sourceExtracted?.issue_description ||
                 sourceAnalysis?.call_summary ||
+                sourceExtracted?.callSummary ||
                 sourceExtracted?.call_summary ||
                 'Service request from call';
+
+            const callSummary =
+                sourceAnalysis?.call_summary ||
+                sourceExtracted?.callSummary ||
+                sourceExtracted?.call_summary ||
+                null;
+
+            const emergencyType =
+                sourceExtracted?.emergency_type ||
+                sourceExtracted?.emergencyType ||
+                sourceDynamicVars?.emergency_type ||
+                sourceDynamicVars?.emergencyType ||
+                null;
 
             // Extract technician ID(s) from collected_dynamic_variables (custom functions)
             // Look for patterns like tech1_id, tech2_id, tech_id, etc.
@@ -354,6 +471,8 @@ router.post('/retell', async (req, res) => {
                 locationName,
                 companyName,
                 issueDescription,
+                callSummary,
+                emergencyType,
                 techIds,
                 serviceLineId
             };
@@ -430,6 +549,8 @@ router.post('/retell', async (req, res) => {
             locationName,
             companyName,
             issueDescription,
+            callSummary,
+            emergencyType,
             techIds,
             serviceLineId
         } = extractedFields;
@@ -520,6 +641,8 @@ router.post('/retell', async (req, res) => {
             });
         }
 
+        serviceTradeSettings = tokenData[0];
+
         // Load job configuration (including emergency behavior)
         const jobConfig = await supabaseService.getJobConfig(agentId);
         const createEmergencyJobs =
@@ -529,25 +652,10 @@ router.post('/retell', async (req, res) => {
 
         // Determine if this call is marked as an emergency.
         // We look in dynamic variables first (highest priority), then extracted data, then analysis.
-        const normalizeBool = (value) => {
-            if (value === null || value === undefined) return null;
-            if (typeof value === 'boolean') return value;
-            if (typeof value === 'number') {
-                if (value === 1) return true;
-                if (value === 0) return false;
-            }
-            if (typeof value === 'string') {
-                const v = value.trim().toLowerCase();
-                if (['true', 'yes', 'y', '1'].includes(v)) return true;
-                if (['false', 'no', 'n', '0'].includes(v)) return false;
-            }
-            return null;
-        };
-
         const emergencySources = [
-            resolvedDynamicVars?.isEmergency ?? resolvedDynamicVars?.is_emergency,
-            resolvedExtracted?.isEmergency ?? resolvedExtracted?.is_emergency,
-            resolvedAnalysis?.isEmergency ?? resolvedAnalysis?.is_emergency
+            resolvedDynamicVars?.isEmergency ?? resolvedDynamicVars?.is_emergency ?? resolvedDynamicVars?.isitEmergency,
+            resolvedExtracted?.isEmergency ?? resolvedExtracted?.is_emergency ?? resolvedExtracted?.isitEmergency,
+            resolvedAnalysis?.isEmergency ?? resolvedAnalysis?.is_emergency ?? resolvedAnalysis?.isitEmergency
         ];
 
         let isEmergencyFlag = null;
@@ -558,6 +666,22 @@ router.post('/retell', async (req, res) => {
                 break;
             }
         }
+
+        notificationBase = buildNotificationContext({
+            call,
+            callId,
+            agentId,
+            callerName,
+            callerPhone,
+            serviceAddress: addressForMatching || rawAddress,
+            locationName,
+            companyName,
+            issueDescription,
+            callSummary,
+            emergencyType,
+            isEmergencyFlag,
+            serviceLineId
+        });
 
         // If the call is explicitly marked as emergency and config forbids creating emergency jobs,
         // we skip job creation entirely. If Retell doesn't send any emergency flag at all,
@@ -570,14 +694,20 @@ router.post('/retell', async (req, res) => {
                 emergencyFlagSourcePresent: true
             });
 
-            return res.status(200).json({
+            return await respondWithNotification({
                 status: 'skipped',
                 reason: 'emergency_jobs_disabled',
                 message: 'Job not created because call is marked as emergency and emergency jobs are disabled in configuration'
+            }, {
+                outcome: 'job_not_created',
+                details: {
+                    reasonCode: 'emergency_jobs_disabled',
+                    reasonMessage: 'Job not created because call is marked as emergency and emergency jobs are disabled in configuration'
+                }
             });
         }
 
-        const authToken = tokenData[0].auth_token;
+        const authToken = serviceTradeSettings.auth_token;
 
         const buildSearchData = (phone) => {
             return {
@@ -628,7 +758,7 @@ router.post('/retell', async (req, res) => {
                 companyName,
                 address: addressForMatching
             });
-            return res.status(200).json({
+            return await respondWithNotification({
                 status: 'pending_review',
                 reason: 'no_matches',
                 message: 'No matching locations found in ServiceTrade',
@@ -637,6 +767,13 @@ router.post('/retell', async (req, res) => {
                     locationName,
                     companyName,
                     address: addressForMatching
+                }
+            }, {
+                outcome: 'job_not_created',
+                details: {
+                    callerPhone: matchedPhone || callerPhone,
+                    reasonCode: 'no_matches',
+                    reasonMessage: 'No matching locations found in ServiceTrade'
                 }
             });
         }
@@ -695,7 +832,7 @@ router.post('/retell', async (req, res) => {
                     }))
                 });
                 
-                return res.status(200).json({
+                return await respondWithNotification({
                     status: 'pending_review',
                     reason: 'multiple_medium_confidence_matches',
                     message: 'Multiple possible locations found',
@@ -706,6 +843,14 @@ router.post('/retell', async (req, res) => {
                         address: c.address,
                         tierReason: c.tierReason
                     }))
+                }, {
+                    outcome: 'job_not_created',
+                    details: {
+                        callerPhone: matchedPhone || callerPhone,
+                        reasonCode: 'multiple_medium_confidence_matches',
+                        reasonMessage: 'Multiple possible locations found',
+                        topCandidates: tier2Candidates.slice(0, 3)
+                    }
                 });
             }
         }
@@ -723,7 +868,7 @@ router.post('/retell', async (req, res) => {
                 }))
             });
             
-            return res.status(200).json({
+            return await respondWithNotification({
                 status: 'pending_review',
                 reason: 'low_confidence_matches',
                 message: 'Only weak matches found',
@@ -734,6 +879,14 @@ router.post('/retell', async (req, res) => {
                     address: c.address,
                     tierReason: c.tierReason
                 }))
+            }, {
+                outcome: 'job_not_created',
+                details: {
+                    callerPhone: matchedPhone || callerPhone,
+                    reasonCode: 'low_confidence_matches',
+                    reasonMessage: 'Only weak matches found',
+                    topCandidates: tier3Candidates.slice(0, 3)
+                }
             });
         }
 
@@ -756,10 +909,10 @@ router.post('/retell', async (req, res) => {
                 validationReason: candidateValidation.reason,
                 validationChecks: candidateValidation.checks
             });
-            return res.status(200).json({
+            return await respondWithNotification({
                 status: 'pending_review',
                 reason: 'retell_data_mismatch',
-                message: 'Selected location does not sufficiently match Retell call data',
+                message: 'Selected location does not sufficiently match call data',
                 candidate: {
                     locationId: selectedCandidate.locationId,
                     locationName: selectedCandidate.locationName,
@@ -768,6 +921,18 @@ router.post('/retell', async (req, res) => {
                     tierReason: selectedCandidate.tierReason
                 },
                 validation: candidateValidation
+            }, {
+                outcome: 'job_not_created',
+                details: {
+                    callerPhone: matchedPhone || callerPhone,
+                    locationName: selectedCandidate.locationName || locationName,
+                    companyName: selectedCandidate.companyName || companyName,
+                    serviceAddress: selectedCandidate.address || addressForMatching || rawAddress,
+                    reasonCode: candidateValidation.reason,
+                    reasonMessage: 'Selected location does not sufficiently match call data',
+                    topCandidates: [selectedCandidate],
+                    validationSummary: buildValidationSummary(candidateValidation)
+                }
             });
         }
 
@@ -799,7 +964,7 @@ router.post('/retell', async (req, res) => {
             addressValidated: validatedAddress ? true : false
         });
 
-        return res.status(200).json({
+        return await respondWithNotification({
             status: 'success',
             job: jobResult,
             match: {
@@ -809,16 +974,39 @@ router.post('/retell', async (req, res) => {
                 tier: matchTier,
                 tierReason: selectedCandidate.tierReason
             }
+        }, {
+            outcome: 'job_created',
+            details: {
+                callerPhone: matchedPhone || callerPhone,
+                locationName: selectedCandidate.locationName || locationName,
+                companyName: selectedCandidate.companyName || companyName,
+                serviceAddress: selectedCandidate.address || addressForMatching || rawAddress,
+                jobId: jobResult?.jobId,
+                jobUri: jobResult?.jobUri,
+                jobNumber: jobResult?.jobNumber,
+                appointmentCreated: jobResult?.appointmentCreated,
+                appointmentError: jobResult?.appointmentError,
+                serviceRequestCreated: jobResult?.serviceRequestCreated,
+                serviceRequestError: jobResult?.serviceRequestError,
+                matchTier,
+                tierReason: selectedCandidate.tierReason
+            }
         });
     } catch (error) {
         logWithContext('error', 'Error handling Retell webhook', {
             error: error.message,
             stack: error.stack
         });
-        return res.status(200).json({
+        return await respondWithNotification({
             status: 'error',
             reason: 'internal_error',
             message: error.message || 'Webhook error'
+        }, {
+            outcome: 'job_not_created',
+            details: {
+                reasonCode: 'internal_error',
+                reasonMessage: error.message || 'Webhook error'
+            }
         });
     }
 });

@@ -12,6 +12,9 @@ const config = {
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY,
     supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
     googleMapsKey: process.env.GOOGLE_MAPS_KEY,
+    sendgridApiKey: process.env.SENDGRID_API_KEY,
+    notificationEmailFrom: process.env.NOTIFICATION_EMAIL_FROM || 'developer@justclara.ai',
+    notificationEmailFromName: process.env.NOTIFICATION_EMAIL_FROM_NAME || 'CLARA.AI',
     nodeEnv: process.env.NODE_ENV || 'development',
     serviceTradeVendorId: process.env.SERVICETRADE_VENDOR_ID || '2319651446605697',
     matchingThresholds: {

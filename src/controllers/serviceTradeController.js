@@ -521,6 +521,7 @@ const createJob = async (jobData, agentId) => {
 
         // Create Appointment - without technician assignment
         let appointment = null;
+        let serviceRequest = null;
         let appointmentErrorMessage = null;
         let serviceRequestErrorMessage = null;
         try {
@@ -554,7 +555,7 @@ const createJob = async (jobData, agentId) => {
                         serviceLineId: resolvedServiceLineId
                     });
                     
-                    const serviceRequest = await serviceTradeService.createServiceRequest(supabaseAuthToken, {
+                    serviceRequest = await serviceTradeService.createServiceRequest(supabaseAuthToken, {
                         description: description,
                         locationId: locationId,
                         serviceLineId: resolvedServiceLineId,
@@ -589,6 +590,8 @@ const createJob = async (jobData, agentId) => {
 
         const result = {
             jobId: job.id,
+            jobUri: job.uri || null,
+            jobNumber: job.number || job.refNumber || null,
             locationId: locationId,
             companyId: companyId,
             callId: call_id,
@@ -600,12 +603,18 @@ const createJob = async (jobData, agentId) => {
 
         if (appointment) {
             result.appointmentId = appointment.id || null;
+            result.appointmentUri = appointment.uri || null;
             
             // Build appointment window with the rounded time that was actually used
             result.appointmentWindow = {
                 start: appointmentDateTime.toISOString(),
                 end: new Date(appointmentDateTime.getTime() + resolvedJobDurationMinutes * 60 * 1000).toISOString()
             };
+        }
+
+        if (serviceRequest) {
+            result.serviceRequestId = serviceRequest.id || null;
+            result.serviceRequestUri = serviceRequest.uri || null;
         }
 
         return result;
