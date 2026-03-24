@@ -287,8 +287,15 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
     let notificationBase = null;
 
     const sendNotification = async (notification) => {
-        if (!serviceTradeSettings || !notificationBase || !notification?.outcome) return;
-        if (notification.outcome !== 'job_created') return;
+        if (!serviceTradeSettings || !notificationBase || !notification?.outcome) {
+            logWithContext('warn', 'sendNotification skipped - missing context', {
+                callId, agentId,
+                hasSettings: !!serviceTradeSettings,
+                hasNotificationBase: !!notificationBase,
+                outcome: notification?.outcome || null
+            });
+            return;
+        }
         try {
             const emailResult = await emailNotificationService.sendJobNotification({
                 settings: serviceTradeSettings,
@@ -303,6 +310,11 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 logWithContext('info', 'Notification email sent', {
                     callId, agentId, outcome: notification.outcome,
                     recipients: emailResult.to, cc: emailResult.cc
+                });
+            } else {
+                logWithContext('warn', 'Notification email skipped', {
+                    callId, agentId, outcome: notification.outcome,
+                    reason: emailResult.reason || 'unknown'
                 });
             }
         } catch (emailError) {
