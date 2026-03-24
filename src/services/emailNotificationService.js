@@ -280,8 +280,6 @@ const composeJobCreatedEmail = (details) => {
         jobLink
     } = buildBaseSections(details);
     const actionLines = ['Job created in ServiceTrade'];
-    if (details.appointmentCreated) actionLines.push('Appointment: Created');
-    if (details.serviceRequestCreated) actionLines.push('Service Request: Created');
     if (details.jobNumber) actionLines.push(`Job Number: ${details.jobNumber}`);
     actionLines.push(`Call Time: ${details.timestampCentral} (Central Time)`);
 
@@ -332,7 +330,7 @@ const composeJobCreatedEmail = (details) => {
             footerLines: [
                 'Expected callback: Within 10 minutes',
                 'Please review and take necessary action if required.',
-                '<span style="color:#C0112E;font-weight:500;">CLARA.AI</span> &middot; The Only AI Trades Business Needs'
+                '<a href="https://www.justclara.ai/" style="color:#C0112E;font-weight:500;text-decoration:none;">CLARA.AI</a> &middot; The Only AI Trades Business Needs'
             ],
             jobLink,
             badgeText: details.priority === 'Emergency' ? 'Emergency Job Created' : 'Service Request Logged'
@@ -410,7 +408,7 @@ const composeJobNotCreatedEmail = (details) => {
             footerLines: [
                 'Expected callback: Manual review needed',
                 'Please review and take necessary action if required.',
-                '<span style="color:#C0112E;font-weight:500;">CLARA.AI</span> &middot; The Only AI Trades Business Needs'
+                '<a href="https://www.justclara.ai/" style="color:#C0112E;font-weight:500;text-decoration:none;">CLARA.AI</a> &middot; The Only AI Trades Business Needs'
             ],
             jobLink: null,
             badgeText: 'Manual Review Needed'

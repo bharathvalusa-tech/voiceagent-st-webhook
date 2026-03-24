@@ -59,13 +59,12 @@ const forwardToApiGateway = async (rawBodyStr, parsedBody, signatureHeader) => {
 const extractPayload = (body) => {
     const eventType = body.event || body.event_type || body.type || body.webhook_event;
     const call = body.call || body.data?.call || body.data || body;
-    const analysis = body.call_analysis || body.analysis || body.data?.call_analysis || body.data?.analysis || {};
+    const analysis = body.call_analysis || body.analysis || body.data?.call_analysis || body.data?.analysis || call?.call_analysis || {};
     const extracted =
         analysis.custom_analysis_data ||
         analysis.extracted_data ||
         analysis.call_analyzed_data ||
         analysis;
-    // collected_dynamic_variables contains data from custom functions during the call
     const dynamicVars = body.collected_dynamic_variables || call?.collected_dynamic_variables || {};
 
     return { eventType, call, analysis, extracted, dynamicVars };
