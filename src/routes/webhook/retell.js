@@ -436,6 +436,18 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 sourceDynamicVars?.emergencyType ||
                 null;
 
+            const callTypeRaw =
+                sourceDynamicVars?.call_type ||
+                sourceDynamicVars?.callType ||
+                sourceExtracted?.call_type ||
+                sourceExtracted?.callType ||
+                sourceAnalysis?.call_type ||
+                sourceAnalysis?.callType ||
+                call?.call_type ||
+                call?.callType ||
+                null;
+            const callType = typeof callTypeRaw === 'string' ? callTypeRaw.trim().toLowerCase() : null;
+
             // Extract technician ID(s) from collected_dynamic_variables (custom functions)
             // Look for patterns like tech1_id, tech2_id, tech_id, etc.
             let techIds = [];
@@ -505,6 +517,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 issueDescription,
                 callSummary,
                 emergencyType,
+                callType,
                 techIds,
                 serviceLineId
             };
@@ -583,9 +596,26 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             issueDescription,
             callSummary,
             emergencyType,
+            callType,
             techIds,
             serviceLineId
         } = extractedFields;
+
+        if (callType === 'web_call') {
+            logWithContext('info', 'Skipping job creation for web_call', {
+                callId,
+                agentId,
+                callType
+            });
+            return await sendNotification({
+                outcome: 'job_not_created',
+                details: {
+                    reasonCode: 'web_call_excluded',
+                    reasonMessage: 'Job creation skipped for web_call',
+                    callerPhone: callerPhone || callerPhoneFallback || call?.from_number || call?.fromNumber || null
+                }
+            });
+        }
 
         if (techIds.length > 0) {
             logWithContext('info', 'Extracted technician IDs from call', {

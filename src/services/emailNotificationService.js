@@ -424,12 +424,19 @@ class EmailNotificationService {
         }
     }
 
-    isNotificationEnabled(settings = {}) {
-        return this.isConfigured && normalizeBoolean(settings.send_job_email);
+    isNotificationEnabled(settings = {}, outcome = 'job_created') {
+        if (!this.isConfigured) return false;
+        if (!normalizeBoolean(settings.send_job_email)) return false;
+
+        if (outcome === 'job_not_created') {
+            return normalizeBoolean(settings.send_job_fail_email);
+        }
+
+        return true;
     }
 
     async sendJobNotification({ settings = {}, outcome, details = {}, overrideTo = null, overrideCc = null }) {
-        if (!this.isNotificationEnabled(settings) && !overrideTo) {
+        if (!this.isNotificationEnabled(settings, outcome) && !overrideTo) {
             return { sent: false, skipped: true, reason: 'notifications_disabled' };
         }
 

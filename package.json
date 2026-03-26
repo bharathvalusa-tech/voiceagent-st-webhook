@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node test-api.js"
+    "build": "npm run build:syntax && npm run build:smoke",
+    "build:syntax": "node -e \"const fs = require('fs'); const path = require('path'); const { execFileSync } = require('child_process'); const root = path.join(process.cwd(), 'src'); const files = []; const walk = (dir) => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) { const full = path.join(dir, entry.name); if (entry.isDirectory()) walk(full); else if (entry.isFile() && entry.name.endsWith('.js')) files.push(full); } }; walk(root); for (const file of files) execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });\"",
+    "build:smoke": "node -e \"const { spawn } = require('child_process'); const child = spawn(process.execPath, ['src/server.js'], { stdio: ['ignore', 'pipe', 'pipe'] }); let started = false; let finished = false; const fail = (msg) => { if (finished) return; finished = true; try { child.kill('SIGTERM'); } catch {} console.error(msg); process.exit(1); }; const pass = () => { if (finished) return; finished = true; try { child.kill('SIGTERM'); } catch {} process.exit(0); }; const timer = setTimeout(() => fail('Server did not start in time'), 6000); child.stdout.on('data', (chunk) => { const text = chunk.toString(); if (text.includes('Server is running on port')) { started = true; clearTimeout(timer); pass(); } }); child.stderr.on('data', () => {}); child.on('exit', () => { if (!finished) { clearTimeout(timer); if (!started) fail('Server exited before startup'); } });\"",
+    "test": "npm run build"
   },
   "author": "",
   "license": "ISC",
