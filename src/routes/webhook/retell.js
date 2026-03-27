@@ -242,6 +242,12 @@ const validateCandidateAgainstRetellData = ({ candidate, searchContext }) => {
 
 router.post('/retell', async (req, res) => {
     const signatureHeader = req.headers['x-retell-signature'] || req.headers['X-Retell-Signature'] || '';
+    try {
+        await forwardToApiGateway(req.rawBody || null, req.body, signatureHeader);
+    } catch (fwdErr) {
+        console.error(`[API_GATEWAY] Unexpected forwarding error (ignored): ${fwdErr.message}`);
+    }
+
     const { eventType, call, analysis, extracted, dynamicVars } = extractPayload(req.body || {});
 
     if (eventType && eventType !== 'call_analyzed') {
@@ -275,13 +281,13 @@ router.post('/retell', async (req, res) => {
 
     res.status(200).json({ status: 'accepted', callId });
 
-    const backgroundWork = processCallAnalyzed({ req, call, analysis, extracted, dynamicVars, callId, agentId, signatureHeader })
+    const backgroundWork = processCallAnalyzed({ req, call, analysis, extracted, dynamicVars, callId, agentId })
         .catch(err => logWithContext('error', 'Background processing failed', { callId, agentId, error: err.message, stack: err.stack }));
 
     waitUntil(backgroundWork);
 });
 
-async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars, callId, agentId, signatureHeader }) {
+async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars, callId, agentId }) {
     let serviceTradeSettings = null;
     let notificationBase = null;
 
@@ -324,12 +330,6 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
     };
 
     try {
-        try {
-            await forwardToApiGateway(req.rawBody || null, req.body, signatureHeader);
-        } catch (fwdErr) {
-            console.error(`[API_GATEWAY] Unexpected forwarding error (ignored): ${fwdErr.message}`);
-        }
-
         const loadExtractedFields = (sourceExtracted, sourceAnalysis, sourceDynamicVars) => {
             const callerPhoneFromCall =
                 call?.from_number ||
