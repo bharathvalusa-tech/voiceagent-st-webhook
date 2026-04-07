@@ -65,6 +65,19 @@ const normalizeTimeString = (timeString) => {
     return null;
 };
 
+const normalizePositiveNumberArray = (values) => {
+    if (!Array.isArray(values)) return [];
+
+    const normalized = [];
+    values.forEach((value) => {
+        const parsed = Number(value);
+        if (!Number.isNaN(parsed) && parsed > 0 && !normalized.includes(parsed)) {
+            normalized.push(parsed);
+        }
+    });
+    return normalized;
+};
+
 // Build a Date in UTC that represents the given wall time in the target timezone
 const buildDateInTimeZone = (dateString, timeString, timeZone) => {
     if (dateString && timeString) {
@@ -409,6 +422,7 @@ const createJob = async (jobData, agentId) => {
             customName = null,
             jobDurationMinutes = null,
             serviceLineId = null,
+            serviceLineIds = [],
             timezone = null,
             techIds = [],
             released = null
@@ -454,7 +468,13 @@ const createJob = async (jobData, agentId) => {
         if (!resolvedJobDurationMinutes || Number.isNaN(resolvedJobDurationMinutes) || resolvedJobDurationMinutes <= 0) {
             throw new Error('Invalid job duration (minutes)');
         }
-        const resolvedServiceLineId = serviceLineId || jobConfig?.service_line_id || 1;
+        const resolvedServiceLineIds = normalizePositiveNumberArray(serviceLineIds);
+        const resolvedServiceLineId = (
+            serviceLineId ||
+            resolvedServiceLineIds[0] ||
+            jobConfig?.service_line_id ||
+            1
+        );
         const resolvedTimeZone = timezone || jobConfig?.timezone || 'America/Toronto';
         const resolvedTechIds = Array.isArray(techIds) ? techIds : [];
         const resolvedReleased = (() => {
@@ -552,6 +572,7 @@ const createJob = async (jobData, agentId) => {
                         locationId: locationId,
                         jobId: job.id,
                         appointmentIds: [appointment.id],
+                        serviceLineIds: resolvedServiceLineIds,
                         serviceLineId: resolvedServiceLineId
                     });
                     
@@ -595,6 +616,8 @@ const createJob = async (jobData, agentId) => {
             locationId: locationId,
             companyId: companyId,
             callId: call_id,
+            serviceLineIds: resolvedServiceLineIds,
+            serviceLineId: resolvedServiceLineId,
             appointmentCreated: Boolean(appointment && appointment.id),
             serviceRequestCreated: Boolean(appointment && appointment.id && !serviceRequestErrorMessage),
             appointmentError: appointmentErrorMessage,

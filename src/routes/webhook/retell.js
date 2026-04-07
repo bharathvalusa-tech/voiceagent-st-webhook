@@ -120,6 +120,19 @@ const normalizeBool = (value) => {
     return null;
 };
 
+const normalizeNumberArray = (values) => {
+    if (!Array.isArray(values)) return [];
+
+    const normalized = [];
+    values.forEach((value) => {
+        const parsed = Number(value);
+        if (!Number.isNaN(parsed) && parsed > 0 && !normalized.includes(parsed)) {
+            normalized.push(parsed);
+        }
+    });
+    return normalized;
+};
+
 const buildNotificationContext = ({
     call,
     callId,
@@ -488,20 +501,56 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 }
             }
 
-            // Extract serviceLineId from collected_dynamic_variables or extracted data
-            // Maps emergency type to service line: Fire Alarm = 1, Sprinkler = 5
-            let serviceLineId = null;
-            const rawServiceLineId =
-                sourceDynamicVars?.serviceLineId ||
-                sourceExtracted?.serviceLineId ||
-                sourceExtracted?.service_line_id ||
-                null;
-            if (rawServiceLineId) {
-                const parsed = Number(rawServiceLineId);
-                if (!Number.isNaN(parsed) && parsed > 0) {
-                    serviceLineId = parsed;
+            // Extract service line IDs from collected_dynamic_variables or extracted data.
+            // Retell may send a single chosen service line or multiple candidates.
+            let serviceLineIds = [];
+            if (sourceDynamicVars && typeof sourceDynamicVars === 'object') {
+                const serviceLineIdKeys = Object.keys(sourceDynamicVars).filter(
+                    (key) =>
+                        /^service[_-]?line\d*[_-]?id$/i.test(key) ||
+                        /^service[_-]?line[_-]?id$/i.test(key)
+                );
+
+                serviceLineIdKeys.forEach((key) => {
+                    const parsed = Number(sourceDynamicVars[key]);
+                    if (!Number.isNaN(parsed) && parsed > 0 && !serviceLineIds.includes(parsed)) {
+                        serviceLineIds.push(parsed);
+                    }
+                });
+
+                if (serviceLineIds.length === 0) {
+                    serviceLineIds = normalizeNumberArray(
+                        sourceDynamicVars?.serviceLineIds ||
+                        sourceDynamicVars?.service_line_ids ||
+                        sourceDynamicVars?.serviceLines ||
+                        []
+                    );
                 }
             }
+
+            if (serviceLineIds.length === 0) {
+                const rawServiceLineId =
+                    sourceExtracted?.serviceLineId ||
+                    sourceExtracted?.service_line_id ||
+                    sourceExtracted?.serviceLine?.id ||
+                    null;
+                const rawServiceLineIds =
+                    sourceExtracted?.serviceLineIds ||
+                    sourceExtracted?.service_line_ids ||
+                    sourceExtracted?.serviceLines?.map((serviceLine) => serviceLine?.id) ||
+                    null;
+
+                if (rawServiceLineIds) {
+                    serviceLineIds = normalizeNumberArray(rawServiceLineIds);
+                } else if (rawServiceLineId) {
+                    const parsed = Number(rawServiceLineId);
+                    if (!Number.isNaN(parsed) && parsed > 0) {
+                        serviceLineIds = [parsed];
+                    }
+                }
+            }
+
+            const serviceLineId = serviceLineIds[0] || null;
 
             return {
                 callerPhone,
@@ -519,7 +568,8 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 emergencyType,
                 callType,
                 techIds,
-                serviceLineId
+                serviceLineId,
+                serviceLineIds
             };
         };
 
@@ -598,7 +648,8 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             emergencyType,
             callType,
             techIds,
-            serviceLineId
+            serviceLineId,
+            serviceLineIds
         } = extractedFields;
 
         if (callType === 'web_call') {
@@ -626,10 +677,11 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             });
         }
 
-        if (serviceLineId) {
-            logWithContext('info', 'Extracted serviceLineId from call', {
+        if (serviceLineIds.length > 0) {
+            logWithContext('info', 'Extracted service line IDs from call', {
                 callId,
                 agentId,
+                serviceLineIds,
                 serviceLineId,
                 source: Object.keys(resolvedDynamicVars).length > 0 ? 'collected_dynamic_variables' : 'extracted_data'
             });
@@ -957,7 +1009,8 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 callerPhoneNumber: matchedPhone,
                 call_id: callId,
                 techIds: techIds,
-                serviceLineId: serviceLineId
+                serviceLineId: serviceLineId,
+                serviceLineIds: serviceLineIds
             },
             agentId
         );
@@ -971,6 +1024,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             tierReason: selectedCandidate.tierReason,
             jobId: jobResult?.jobId,
             techIds: techIds.length > 0 ? techIds : null,
+            serviceLineIds: serviceLineIds.length > 0 ? serviceLineIds : null,
             serviceLineId: serviceLineId || null,
             addressValidated: validatedAddress ? true : false
         });
