@@ -214,7 +214,7 @@ const buildHtmlBody = ({ details, cards, footerLines, jobLink, badgeText }) => {
                 </div>
                 <div style="background:#FFFFFF;padding:24px 24px 8px 24px;">
                     <div style="color:#4A4A4A;font-size:17px;line-height:1.6;margin:0 0 18px 0;">
-                        Hi Team, a new service request has been logged by Clara.
+                        Hi Team, a new service request has been received by Clara.
                     </div>
                     ${actionButton}
                     ${renderedCards}
