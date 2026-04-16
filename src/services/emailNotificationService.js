@@ -249,11 +249,13 @@ const buildBaseSections = (details) => {
             heading: 'Caller Details',
             lines: [
                 `Name: ${details.customerName}`,
-                `Phone: ${details.callerPhone}`
+                `Phone: ${details.callerPhone}`,
+                `Call ID: ${details.callId || 'Not available'}`
             ],
             rows: [
                 renderDetailRow('Name', details.customerName),
-                renderDetailRow('Phone', details.callerPhone)
+                renderDetailRow('Phone', details.callerPhone),
+                renderDetailRow('Call ID', details.callId || 'Not available', { monospace: true })
             ]
         },
         serviceLocationSection: {

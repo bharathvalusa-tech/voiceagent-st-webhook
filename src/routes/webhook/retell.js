@@ -1,5 +1,4 @@
 // @ts-nocheck
-const config = require('../../config/environment');
 const express = require('express');
 const { waitUntil } = require('@vercel/functions');
 const retellService = require('../../services/retellService');
@@ -7,6 +6,7 @@ const { validateAddress, buildAddressQuery } = require('../../services/googleMap
 const { findCustomerWithConfidence } = require('../../services/customerMatchingService');
 const { createJob } = require('../../controllers/serviceTradeController');
 const emailNotificationService = require('../../services/emailNotificationService');
+const { disambiguateLocations } = require('../../services/gptDisambiguationService');
 const supabaseService = require('../../services/supabaseService');
 const router = express.Router();
 
@@ -255,11 +255,7 @@ const validateCandidateAgainstRetellData = ({ candidate, searchContext }) => {
 
 router.post('/retell', async (req, res) => {
     const signatureHeader = req.headers['x-retell-signature'] || req.headers['X-Retell-Signature'] || '';
-    try {
-        await forwardToApiGateway(req.rawBody || null, req.body, signatureHeader);
-    } catch (fwdErr) {
-        console.error(`[API_GATEWAY] Unexpected forwarding error (ignored): ${fwdErr.message}`);
-    }
+    await forwardToApiGateway(req.rawBody || null, req.body, signatureHeader);
 
     const { eventType, call, analysis, extracted, dynamicVars } = extractPayload(req.body || {});
 
@@ -653,19 +649,60 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         } = extractedFields;
 
         if (callType === 'web_call') {
-            logWithContext('info', 'Skipping job creation for web_call', {
+            logWithContext('info', 'Skipping job creation and email for web_call', {
                 callId,
                 agentId,
                 callType
             });
-            return await sendNotification({
-                outcome: 'job_not_created',
-                details: {
-                    reasonCode: 'web_call_excluded',
-                    reasonMessage: 'Job creation skipped for web_call',
-                    callerPhone: callerPhone || callerPhoneFallback || call?.from_number || call?.fromNumber || null
-                }
+            return;
+        }
+
+        // --- Skip non-actionable calls (no job, no email) ---
+        const callDurationMs = call?.duration_ms || 0;
+        const disconnectionReason = call?.disconnection_reason || '';
+        const inVoicemail = resolvedAnalysis?.in_voicemail === true;
+        const callSuccessful = resolvedAnalysis?.call_successful;
+        const hasCallerName = Boolean(callerName);
+        const hasAddress = Boolean(rawAddress);
+
+        // 1. Very short calls (< 15s) — wrong numbers, pocket dials, robocalls
+        if (callDurationMs > 0 && callDurationMs < 15000) {
+            logWithContext('info', 'Skipping short call (< 15s)', {
+                callId, agentId, callDurationMs, disconnectionReason
             });
+            return;
+        }
+
+        // 2. Voicemail detected — AI was talking to a voicemail system
+        if (inVoicemail) {
+            logWithContext('info', 'Skipping voicemail call', {
+                callId, agentId, callDurationMs
+            });
+            return;
+        }
+
+        // 3. Call not successful — garbled audio, caller couldn't hear, etc.
+        if (callSuccessful === false) {
+            logWithContext('info', 'Skipping unsuccessful call', {
+                callId, agentId, callDurationMs, disconnectionReason
+            });
+            return;
+        }
+
+        // 4. No caller name AND no address — nothing actionable
+        if (!hasCallerName && !hasAddress) {
+            logWithContext('info', 'Skipping call with no name and no address', {
+                callId, agentId, callDurationMs, disconnectionReason
+            });
+            return;
+        }
+
+        // 5. user_hangup with no extracted data — caller left before providing info
+        if (disconnectionReason === 'user_hangup' && !hasCallerName && !hasAddress) {
+            logWithContext('info', 'Skipping user_hangup with no extracted data', {
+                callId, agentId, callDurationMs
+            });
+            return;
         }
 
         if (techIds.length > 0) {
@@ -914,29 +951,76 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                     tier2Count: tier2Candidates.length
                 });
             } else {
-                // Multiple different locations in tier 2 - needs review
-                logWithContext('warn', 'Multiple tier 2 locations found - manual review needed', {
-                    callId,
-                    agentId,
-                    tier2Count: tier2Candidates.length,
-                    locationIds: uniqueLocationIds,
-                    topCandidates: tier2Candidates.slice(0, 3).map(c => ({
-                        locationId: c.locationId,
-                        locationName: c.locationName,
-                        companyName: c.companyName,
-                        tierReason: c.tierReason
-                    }))
-                });
-                
-                return await sendNotification({
-                    outcome: 'job_not_created',
-                    details: {
-                        callerPhone: matchedPhone || callerPhone,
-                        reasonCode: 'multiple_medium_confidence_matches',
-                        reasonMessage: 'Multiple possible locations found',
-                        topCandidates: tier2Candidates.slice(0, 3)
+                // Multiple different locations in tier 2 - try GPT disambiguation
+                // if caller provided a location or company name
+                if (locationName || companyName) {
+                    logWithContext('info', 'Multiple tier 2 locations - attempting GPT disambiguation', {
+                        callId,
+                        agentId,
+                        tier2Count: tier2Candidates.length,
+                        locationIds: uniqueLocationIds,
+                        callerLocationName: locationName,
+                        callerCompanyName: companyName
+                    });
+
+                    // Dedupe candidates by locationId for GPT (avoid showing same location twice)
+                    const dedupedForGpt = [];
+                    const seenLocationIds = new Set();
+                    for (const c of tier2Candidates) {
+                        if (c.locationId && !seenLocationIds.has(c.locationId)) {
+                            seenLocationIds.add(c.locationId);
+                            dedupedForGpt.push(c);
+                        }
                     }
-                });
+
+                    const gptResult = await disambiguateLocations(dedupedForGpt, {
+                        locationName,
+                        companyName,
+                        address: addressForMatching || rawAddress
+                    });
+
+                    if (gptResult) {
+                        // GPT picked a location - use it as tier 2 match
+                        selectedCandidate = tier2Candidates.find(c => c.locationId === gptResult.locationId) || dedupedForGpt[gptResult.matchIndex - 1];
+                        matchTier = 2;
+
+                        logWithContext('info', 'GPT disambiguation resolved location', {
+                            callId,
+                            agentId,
+                            locationId: selectedCandidate.locationId,
+                            locationName: selectedCandidate.locationName,
+                            companyName: selectedCandidate.companyName,
+                            gptResponse: gptResult.gptResponse,
+                            tier2Count: tier2Candidates.length
+                        });
+                    }
+                }
+
+                // If GPT didn't resolve or wasn't attempted, fall through to manual review
+                if (!selectedCandidate) {
+                    logWithContext('warn', 'Multiple tier 2 locations found - manual review needed', {
+                        callId,
+                        agentId,
+                        tier2Count: tier2Candidates.length,
+                        locationIds: uniqueLocationIds,
+                        topCandidates: tier2Candidates.slice(0, 3).map(c => ({
+                            locationId: c.locationId,
+                            locationName: c.locationName,
+                            companyName: c.companyName,
+                            tierReason: c.tierReason
+                        }))
+                    });
+
+                    return await sendNotification({
+                        outcome: 'job_not_created',
+                        details: {
+                            callerPhone: matchedPhone || callerPhone,
+                            reasonCode: 'multiple_medium_confidence_matches',
+                            reasonMessage: 'Multiple possible locations found',
+                            topCandidates: tier2Candidates.slice(0, 3)
+                        }
+                    });
+                }
             }
         }
         // Tier 3: Low confidence - needs review

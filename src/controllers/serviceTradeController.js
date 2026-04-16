@@ -264,60 +264,6 @@ const getJobsByLocation = async (locationId, agentId, status) => {
     return jobDetails;
 };
 
-/**
- * Get jobs for a customer by phone number (calls customer lookup first)
- * Queries jobs across ALL locations the contact is associated with to avoid
- * returning jobs from an arbitrary single location.
- * @param {string} fromPhoneNumber - The phone number to search for
- * @param {string} agentId - The agent ID
- * @param {string} status - The job status filter
- * @returns {Promise<Object>} - Object containing customer info and job details
- * @throws {Error} - If customer or validation fails
- */
-const getJobsByPhone = async (fromPhoneNumber, agentId, status) => {
-    // Step 1: Get customer information first (includes all locations)
-    const customerData = await getCustomerByPhone(fromPhoneNumber, agentId);
-    
-    // Step 2: Get jobs across ALL locations the contact is associated with
-    const locations = customerData.locations || [];
-    const locationIds = locations.map(loc => loc.id).filter(Boolean);
-    
-    if (locationIds.length === 0) {
-        throw new Error('Customer has no associated locations');
-    }
-
-    const jobPromises = locationIds.map(locId =>
-        getJobsByLocation(locId, agentId, status).catch(err => {
-            console.log(`⚠️ Failed to fetch jobs for location ${locId}:`, err.message);
-            return [];
-        })
-    );
-    const jobArrays = await Promise.all(jobPromises);
-    const allJobs = jobArrays.flat();
-
-    // Deduplicate by jobId in case the same job appears under multiple locations
-    const seen = new Set();
-    const jobDetails = allJobs.filter(job => {
-        if (seen.has(job.jobId)) return false;
-        seen.add(job.jobId);
-        return true;
-    });
-    
-    return {
-        customer: {
-            name: customerData.name,
-            phone: customerData.phone,
-            email: customerData.email,
-            locations: locations,
-            // Backward compat — prefer using 'locations' array
-            locationId: customerData.locationId,
-            address: customerData.address,
-            customerId: customerData.customerId
-        },
-        jobDetails
-    };
-};
-
 const getInvoicesByJobId = async (jobId, agentId) => {
     if (!jobId) {
         throw new Error('jobId is required');
@@ -352,52 +298,6 @@ const roundTimeUpToQuarter = (date) => {
     
     console.log(`⏰ Rounded time from ${date.toLocaleTimeString()} to ${rounded.toLocaleTimeString()}`);
     return rounded;
-};
-
-/**
- * Parse address string into components
- * @param {string} addressString - Raw address string
- * @param {string} state - State name or abbreviation
- * @returns {Object} - Parsed address components
- */
-const parseAddress = (addressString, state) => {
-    console.log('Parsing address:', addressString, 'State:', state);
-    
-    // State name to abbreviation mapping
-    const stateAbbreviations = {
-        'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR',
-        'california': 'CA', 'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE',
-        'florida': 'FL', 'georgia': 'GA', 'hawaii': 'HI', 'idaho': 'ID',
-        'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA', 'kansas': 'KS',
-        'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
-        'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS',
-        'missouri': 'MO', 'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV',
-        'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
-        'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH', 'oklahoma': 'OK',
-        'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
-        'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT',
-        'vermont': 'VT', 'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
-        'wisconsin': 'WI', 'wyoming': 'WY'
-    };
-    
-    // Simple parsing - can be enhanced based on actual address formats
-    const parts = addressString.split(',').map(p => p.trim());
-    
-    // Convert state to abbreviation if it's a full name
-    let stateAbbr = state;
-    if (state && state.length > 2) {
-        stateAbbr = stateAbbreviations[state.toLowerCase()] || state.substring(0, 2).toUpperCase();
-    }
-    
-    const parsed = {
-        street: parts[0] || addressString || 'Unknown',
-        city: parts[1] || 'Unknown',
-        state: stateAbbr || 'TX',
-        postalCode: parts[parts.length - 1]?.match(/\d{4,5}/)?.[0] || '00000'
-    };
-    
-    console.log('Parsed address:', JSON.stringify(parsed));
-    return parsed;
 };
 
 /**
@@ -654,12 +554,8 @@ module.exports = {
     getAuthToken,
     getCustomerByPhone,
     getJobsByLocation,
-    getJobsByPhone,
-    formatUnixToDateTime,
     getInvoicesByJobId,
-    createJob,
-    parseAddress,
-    roundTimeUpToQuarter
+    createJob
 };
 
 

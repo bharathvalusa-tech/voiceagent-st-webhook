@@ -3,29 +3,6 @@ class ServiceTradeService {
         this.baseUrl = 'https://api.servicetrade.com/api';
     }
 
-    async getVendorInfo(authToken) {
-        try {
-            const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
-            const response = await fetch(`${this.baseUrl}/vendor`, {
-                method: "GET",
-                headers: {
-                    "Cookie": cookieValue,
-                    "Content-Type": "application/json"
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
-            }
-
-            const { data } = await response.json();
-            return data.vendor || data;
-        } catch (error) {
-            console.error('Error fetching vendor info from ServiceTrade:', error);
-            throw error;
-        }
-    }
-
     async getInvoices(authToken, jobId) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
