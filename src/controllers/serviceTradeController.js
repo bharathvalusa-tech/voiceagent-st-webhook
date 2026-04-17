@@ -383,6 +383,14 @@ const createJob = async (jobData, agentId) => {
             if (cfg !== null && cfg !== undefined) return Boolean(cfg);
             return true; // default behavior
         })();
+        // Whether to create an appointment (and linked service request) alongside the job.
+        // Default true for backward compatibility; set create_appointment=false in
+        // servicetrade_job_configs to create Job only (dispatcher schedules manually).
+        const shouldCreateAppointment = (() => {
+            const cfg = jobConfig?.create_appointment;
+            if (cfg === null || cfg === undefined) return true;
+            return Boolean(cfg);
+        })();
 
         const normalizedAppointmentTime = normalizeTimeString(appointmentTime);
         let appointmentDateTime = buildDateInTimeZone(appointmentDate, normalizedAppointmentTime, resolvedTimeZone);
@@ -439,65 +447,70 @@ const createJob = async (jobData, agentId) => {
 
         console.log('✅ Job created:', job.id);
 
-        // Create Appointment - without technician assignment
         let appointment = null;
         let serviceRequest = null;
         let appointmentErrorMessage = null;
         let serviceRequestErrorMessage = null;
-        try {
-            console.log('📅 Creating appointment for job:', job.id);
 
-            // Convert date/time to Unix timestamp (seconds)
-            const windowStart = Math.floor(appointmentDateTime.getTime() / 1000);
-            const windowEnd = windowStart + (resolvedJobDurationMinutes * 60); // duration in seconds
-            
-            appointment = await serviceTradeService.createAppointment(supabaseAuthToken, {
-                jobId: job.id,
-                windowStart: windowStart,
-                windowEnd: windowEnd,
-                techIds: resolvedTechIds,
-                serviceRequestIds: [],
-                released: resolvedReleased
-            });
-            
-            console.log('✅ Appointment created:', appointment?.id || 'success');
-            console.log('ℹ️ No technicians assigned - appointment created without technician assignment');
+        if (!shouldCreateAppointment) {
+            console.log('ℹ️ Skipping appointment and service request (create_appointment=false in job config)');
+        } else {
+            // Create Appointment - without technician assignment
+            try {
+                console.log('📅 Creating appointment for job:', job.id);
 
-            // Create service request and link it to the appointment (if appointment was created)
-            if (appointment && appointment.id) {
-                try {
-                    console.log('📋 Creating service request');
-                    console.log('📋 Service request data:', {
-                        description: description,
-                        locationId: locationId,
-                        jobId: job.id,
-                        appointmentIds: [appointment.id],
-                        serviceLineIds: resolvedServiceLineIds,
-                        serviceLineId: resolvedServiceLineId
-                    });
-                    
-                    serviceRequest = await serviceTradeService.createServiceRequest(supabaseAuthToken, {
-                        description: description,
-                        locationId: locationId,
-                        serviceLineId: resolvedServiceLineId,
-                        jobId: job.id,
-                        appointmentIds: [appointment.id]
-                    });
-                    
-                    console.log('✅ Service request created successfully:', JSON.stringify(serviceRequest, null, 2));
-                } catch (serviceRequestError) {
-                    console.error('❌ Service request creation failed:', serviceRequestError.message);
-                    console.error('❌ Service request error stack:', serviceRequestError.stack);
-                    serviceRequestErrorMessage = serviceRequestError.message || 'Service request creation failed';
-                    // Don't fail the entire job creation if service request fails
+                // Convert date/time to Unix timestamp (seconds)
+                const windowStart = Math.floor(appointmentDateTime.getTime() / 1000);
+                const windowEnd = windowStart + (resolvedJobDurationMinutes * 60); // duration in seconds
+
+                appointment = await serviceTradeService.createAppointment(supabaseAuthToken, {
+                    jobId: job.id,
+                    windowStart: windowStart,
+                    windowEnd: windowEnd,
+                    techIds: resolvedTechIds,
+                    serviceRequestIds: [],
+                    released: resolvedReleased
+                });
+
+                console.log('✅ Appointment created:', appointment?.id || 'success');
+                console.log('ℹ️ No technicians assigned - appointment created without technician assignment');
+
+                // Create service request and link it to the appointment (if appointment was created)
+                if (appointment && appointment.id) {
+                    try {
+                        console.log('📋 Creating service request');
+                        console.log('📋 Service request data:', {
+                            description: description,
+                            locationId: locationId,
+                            jobId: job.id,
+                            appointmentIds: [appointment.id],
+                            serviceLineIds: resolvedServiceLineIds,
+                            serviceLineId: resolvedServiceLineId
+                        });
+
+                        serviceRequest = await serviceTradeService.createServiceRequest(supabaseAuthToken, {
+                            description: description,
+                            locationId: locationId,
+                            serviceLineId: resolvedServiceLineId,
+                            jobId: job.id,
+                            appointmentIds: [appointment.id]
+                        });
+
+                        console.log('✅ Service request created successfully:', JSON.stringify(serviceRequest, null, 2));
+                    } catch (serviceRequestError) {
+                        console.error('❌ Service request creation failed:', serviceRequestError.message);
+                        console.error('❌ Service request error stack:', serviceRequestError.stack);
+                        serviceRequestErrorMessage = serviceRequestError.message || 'Service request creation failed';
+                        // Don't fail the entire job creation if service request fails
+                    }
+                } else {
+                    console.log('⚠️ Skipping service request creation - no appointment created');
                 }
-            } else {
-                console.log('⚠️ Skipping service request creation - no appointment created');
+            } catch (appointmentError) {
+                console.error('⚠️ Appointment creation failed:', appointmentError.message);
+                appointmentErrorMessage = appointmentError.message || 'Appointment creation failed';
+                // Don't fail the entire job creation if appointment fails
             }
-        } catch (appointmentError) {
-            console.error('⚠️ Appointment creation failed:', appointmentError.message);
-            appointmentErrorMessage = appointmentError.message || 'Appointment creation failed';
-            // Don't fail the entire job creation if appointment fails
         }
 
         if (callerContactId && !job.primaryContactId && !primaryContactId) {
