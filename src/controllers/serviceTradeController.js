@@ -351,11 +351,10 @@ const createJob = async (jobData, agentId) => {
             return null;
         });
 
-        // Determine vendorId and ensure one is present from either request or config
-        const resolvedVendorId = companyId || jobConfig?.vendor_id;
-        if (!resolvedVendorId) {
-            throw new Error('Missing required field: companyId (vendorId) and no vendor_id found in job config');
-        }
+        // Determine vendorId from request or config. Missing/invalid vendorId is non-fatal —
+        // the service layer omits it from the payload when null, and falls back to a vendorId-less
+        // retry if ServiceTrade rejects it as not-found.
+        const resolvedVendorId = companyId || jobConfig?.vendor_id || null;
 
         const supabaseAuthToken = await getAuthToken(agentId);
 

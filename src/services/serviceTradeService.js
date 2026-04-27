@@ -417,36 +417,58 @@ class ServiceTradeService {
     async createJob(authToken, locationId, jobData) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
-            const payload = {
+            const basePayload = {
                 locationId: locationId,
-                vendorId: jobData.vendorId,
                 type: jobData.type || 'Service Call',
                 description: jobData.description,
                 customName: jobData.customName || 'After Hours Service Call'
             };
 
+            if (jobData.vendorId) {
+                basePayload.vendorId = jobData.vendorId;
+            }
+
             // Set primary contact if provided (the person who called)
             if (jobData.primaryContactId) {
-                payload.primaryContactId = jobData.primaryContactId;
+                basePayload.primaryContactId = jobData.primaryContactId;
             }
 
             if (jobData.dueBy) {
-                payload.dueBy = new Date(jobData.dueBy).getTime() / 1000;
+                basePayload.dueBy = new Date(jobData.dueBy).getTime() / 1000;
             }
 
-            console.log('Creating job with payload:', JSON.stringify(payload));
+            const postJob = async (payload) => {
+                console.log('Creating job with payload:', JSON.stringify(payload));
+                const response = await fetch(`${this.baseUrl}/job`, {
+                    method: "POST",
+                    headers: {
+                        "Cookie": cookieValue,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(payload)
+                });
+                const responseText = await response.text();
+                console.log('Job creation response:', response.status, responseText);
+                return { response, responseText };
+            };
 
-            const response = await fetch(`${this.baseUrl}/job`, {
-                method: "POST",
-                headers: {
-                    "Cookie": cookieValue,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(payload)
-            });
+            let { response, responseText } = await postJob(basePayload);
 
-            const responseText = await response.text();
-            console.log('Job creation response:', response.status, responseText);
+            // Fallback: if ServiceTrade rejects the supplied vendorId as not-found,
+            // retry once without vendorId so a stale/wrong config does not block job creation.
+            if (!response.ok && basePayload.vendorId) {
+                let isVendorIdError = false;
+                try {
+                    const parsed = JSON.parse(responseText);
+                    isVendorIdError = Boolean(parsed?.messages?.validation?.vendorId);
+                } catch (_) { /* not JSON, leave false */ }
+
+                if (isVendorIdError) {
+                    console.warn(`⚠️ vendorId ${basePayload.vendorId} rejected by ServiceTrade; retrying without vendorId`);
+                    const { vendorId, ...payloadWithoutVendor } = basePayload;
+                    ({ response, responseText } = await postJob(payloadWithoutVendor));
+                }
+            }
 
             if (!response.ok) {
                 throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText} - ${responseText}`);
