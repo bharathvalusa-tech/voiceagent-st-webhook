@@ -384,14 +384,18 @@ const composeJobNotCreatedEmail = (details) => {
         actionSection
     ];
 
+    const isNotServiceCall = details.reasonCode === 'not_a_service_call';
+    const subject = isNotServiceCall
+        ? `Not a Service Call - ${details.customerName} | ${details.emergencyType}`
+        : `Service Request Needs Review - ${details.customerName} | ${details.emergencyType}`;
+    const badgeText = isNotServiceCall ? 'Not a Service Call' : 'Manual Review Needed';
+
     return {
-        subject: `Service Request Needs Review - ${details.customerName} | ${details.emergencyType}`,
+        subject,
         text: buildTextBody({
             introLine: 'Hi Team,',
             sections: textSections,
             footerLines: [
-                'Expected callback: Manual review needed',
-                '',
                 'Please review and take necessary action if required.',
                 '-- CLARA.AI'
             ]
@@ -408,12 +412,11 @@ const composeJobNotCreatedEmail = (details) => {
                 }
             ],
             footerLines: [
-                'Expected callback: Manual review needed',
                 'Please review and take necessary action if required.',
                 '<a href="https://www.justclara.ai/" style="color:#C0112E;font-weight:500;text-decoration:none;">CLARA.AI</a> &middot; The Only AI Trades Business Needs'
             ],
             jobLink: null,
-            badgeText: 'Manual Review Needed'
+            badgeText
         })
     };
 };

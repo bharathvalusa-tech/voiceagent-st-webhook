@@ -705,6 +705,35 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             return;
         }
 
+        // 6. service_call feature flag — if Retell explicitly sets service_call=false, skip job creation.
+        //    If the variable is true or absent (null/undefined), proceed normally.
+        const serviceCallSources = [
+            resolvedDynamicVars?.service_call ?? resolvedDynamicVars?.serviceCall,
+            resolvedExtracted?.service_call ?? resolvedExtracted?.serviceCall,
+            resolvedAnalysis?.service_call ?? resolvedAnalysis?.serviceCall
+        ];
+        let serviceCallFlag = null;
+        for (const sourceVal of serviceCallSources) {
+            const normalized = normalizeBool(sourceVal);
+            if (normalized !== null) {
+                serviceCallFlag = normalized;
+                break;
+            }
+        }
+        if (serviceCallFlag === false) {
+            logWithContext('info', 'Skipping job creation — service_call flag is false', {
+                callId, agentId
+            });
+            return await sendNotification({
+                outcome: 'job_not_created',
+                details: {
+                    reasonCode: 'not_a_service_call',
+                    reasonLabel: 'Not a Service Call',
+                    reasonMessage: 'The caller was not reaching out for a service request, so no job was created in ServiceTrade.'
+                }
+            });
+        }
+
         if (techIds.length > 0) {
             logWithContext('info', 'Extracted technician IDs from call', {
                 callId,
