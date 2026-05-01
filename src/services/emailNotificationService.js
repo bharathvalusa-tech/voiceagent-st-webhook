@@ -421,11 +421,73 @@ const composeJobNotCreatedEmail = (details) => {
     };
 };
 
+const INTERNAL_ALERT_RECIPIENTS = [
+    'bharath.valusa@justclara.ai',
+    'yochana@justclara.ai',
+    'pavan.kalyan@justclara.ai',
+    'naveen@justclara.ai'
+];
+
 class EmailNotificationService {
     constructor() {
         this.isConfigured = Boolean(config.sendgridApiKey);
         if (this.isConfigured) {
             sgMail.setApiKey(config.sendgridApiKey);
+        }
+    }
+
+    async sendInternalAlert({ callId, agentId, companyName, errorType, errorMessage }) {
+        if (!this.isConfigured) return;
+
+        const isUnauthorized = /401|unauthorized/i.test(errorMessage || '');
+        const subject = isUnauthorized
+            ? `[CLARA ALERT] 401 Unauthorized — ServiceTrade token expired | ${companyName || agentId}`
+            : `[CLARA ALERT] Webhook error — ${errorType || 'Unknown'} | ${companyName || agentId}`;
+
+        const timestamp = formatTimestampCentral(Date.now());
+        const html = `
+            <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:24px;background:#F5F5F5;">
+                <div style="background:#FFFFFF;border:0.5px solid #EDEDED;border-radius:12px;overflow:hidden;">
+                    <div style="background:#FFF3CD;border-bottom:2px solid #FFC107;padding:20px 24px;">
+                        <div style="color:#C0112E;font-size:11px;letter-spacing:1px;text-transform:uppercase;font-weight:600;">CLARA.AI — Internal Alert</div>
+                        <div style="color:#1A1A1A;font-size:22px;font-weight:600;margin-top:8px;">⚠ Webhook Processing Error</div>
+                    </div>
+                    <div style="padding:24px;">
+                        <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Error Type</div><div style="font-size:15px;color:#2A2A2A;">${escapeHtml(errorType || 'Internal Error')}</div></div>
+                        <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Error Message</div><div style="font-size:15px;color:#2A2A2A;font-family:monospace;">${escapeHtml(errorMessage || 'No message')}</div></div>
+                        <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Company / Agent</div><div style="font-size:15px;color:#2A2A2A;">${escapeHtml(companyName || 'Unknown')} &mdash; <span style="font-family:monospace;">${escapeHtml(agentId || 'N/A')}</span></div></div>
+                        <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Call ID</div><div style="font-size:15px;color:#2A2A2A;font-family:monospace;">${escapeHtml(callId || 'N/A')}</div></div>
+                        <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Time (Central)</div><div style="font-size:15px;color:#2A2A2A;">${escapeHtml(timestamp)}</div></div>
+                        ${isUnauthorized ? `<div style="background:#FFF3CD;border:1px solid #FFC107;border-radius:8px;padding:12px 16px;margin-top:8px;color:#856404;font-size:14px;">The ServiceTrade session token has expired or is invalid. Please log in to ServiceTrade and update the <strong>auth_token</strong> in Supabase for this agent.</div>` : ''}
+                    </div>
+                    <div style="padding:0 24px 20px;color:#9A9A9A;font-size:12px;">
+                        <a href="${BRAND_DASHBOARD_URL}" style="color:#C0112E;text-decoration:none;font-weight:500;">CLARA.AI</a> &middot; The Only AI Trades Business Needs
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const text = [
+            'CLARA.AI — Internal Webhook Alert',
+            '',
+            `Error Type: ${errorType || 'Internal Error'}`,
+            `Error Message: ${errorMessage || 'No message'}`,
+            `Company / Agent: ${companyName || 'Unknown'} — ${agentId || 'N/A'}`,
+            `Call ID: ${callId || 'N/A'}`,
+            `Time (Central): ${timestamp}`,
+            isUnauthorized ? '\nACTION REQUIRED: ServiceTrade token has expired. Update auth_token in Supabase.' : ''
+        ].join('\n').trim();
+
+        try {
+            await sgMail.send({
+                to: INTERNAL_ALERT_RECIPIENTS,
+                from: { email: config.notificationEmailFrom, name: config.notificationEmailFromName },
+                subject,
+                text,
+                html
+            });
+        } catch (alertError) {
+            console.error(JSON.stringify({ level: 'error', message: 'Failed to send internal alert email', error: alertError.message }));
         }
     }
 

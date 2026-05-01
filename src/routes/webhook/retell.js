@@ -681,9 +681,10 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             return;
         }
 
-        // 3. Call not successful — garbled audio, caller couldn't hear, etc.
-        if (callSuccessful === false) {
-            logWithContext('info', 'Skipping unsuccessful call', {
+        // 3. Call not successful with no usable data — garbled audio, caller couldn't hear, etc.
+        //    If we have a name or address, still send a fail email so the team knows someone called.
+        if (callSuccessful === false && !hasCallerName && !hasAddress) {
+            logWithContext('info', 'Skipping unsuccessful call with no extracted data', {
                 callId, agentId, callDurationMs, disconnectionReason
             });
             return;
@@ -703,6 +704,43 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 callId, agentId, callDurationMs
             });
             return;
+        }
+
+        // 6. Call not successful but has some data — send fail email and stop (don't try job creation)
+        if (callSuccessful === false) {
+            logWithContext('info', 'Call unsuccessful but has caller data — sending fail notification', {
+                callId, agentId, callDurationMs, disconnectionReason, hasCallerName, hasAddress
+            });
+            const tokenData = await supabaseService.getServiceTradeToken(agentId);
+            if (tokenData && tokenData.length > 0) {
+                serviceTradeSettings = tokenData[0];
+                const isEmergencyFlagEarly = normalizeBool(
+                    resolvedDynamicVars?.isEmergency ?? resolvedDynamicVars?.is_emergency ?? resolvedDynamicVars?.isitEmergency
+                );
+                notificationBase = buildNotificationContext({
+                    call,
+                    callId,
+                    agentId,
+                    callerName,
+                    callerPhone,
+                    serviceAddress: rawAddress,
+                    locationName,
+                    companyName,
+                    issueDescription,
+                    callSummary,
+                    emergencyType,
+                    isEmergencyFlag: isEmergencyFlagEarly,
+                    serviceLineId
+                });
+            }
+            return await sendNotification({
+                outcome: 'job_not_created',
+                details: {
+                    reasonCode: 'incomplete_call',
+                    reasonLabel: 'Incomplete Call',
+                    reasonMessage: 'Caller did not provide enough information to create a job. Manual follow-up may be needed.'
+                }
+            });
         }
 
         // 6. service_call feature flag — if Retell explicitly sets service_call=false, skip job creation.
@@ -1164,13 +1202,27 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         logWithContext('error', 'Error handling Retell webhook', {
             callId, agentId, error: error.message, stack: error.stack
         });
-        await sendNotification({
-            outcome: 'job_not_created',
-            details: {
-                reasonCode: 'internal_error',
-                reasonMessage: error.message || 'Webhook error'
-            }
-        });
+
+        const isUnauthorized = /401|unauthorized/i.test(error.message || '');
+        const errorType = isUnauthorized ? '401 Unauthorized' : 'Internal Error';
+        const companyName = serviceTradeSettings?.Name || null;
+
+        await Promise.all([
+            sendNotification({
+                outcome: 'job_not_created',
+                details: {
+                    reasonCode: 'internal_error',
+                    reasonMessage: error.message || 'Webhook error'
+                }
+            }),
+            emailNotificationService.sendInternalAlert({
+                callId,
+                agentId,
+                companyName,
+                errorType,
+                errorMessage: error.message || 'Webhook error'
+            })
+        ]);
     }
 }
 
