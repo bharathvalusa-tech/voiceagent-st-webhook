@@ -250,12 +250,6 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         addressMatch = addressQueryMatch || addressSimilarityScore > threshold;
     }
 
-    // Contact name match
-    const nameSimilarity = searchData.name && candidate.contactName
-        ? fuzzySimilarity(searchData.name, candidate.contactName)
-        : 0;
-    const nameMatch = nameSimilarity > 0.6;
-
     // Count how many unique locations are associated with this company name
     const locationsForCompany = candidate.companyName
         ? new Set(
@@ -395,8 +389,6 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
         addressSimilarity: addressSimilarityScore,
         locationSimilarity: locationNameFuzzy,
         companySimilarity: companyNameFuzzy,
-        nameSimilarity,
-        nameMatch,
         locationsForCompany,
         locationsForExactPhone
     };

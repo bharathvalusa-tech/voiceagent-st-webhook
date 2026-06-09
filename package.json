@@ -20,8 +20,9 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "google-libphonenumber": "^3.2.43",
-    "libphonenumber-js": "^1.12.26",
+    "libphonenumber-js": "^1.12.26"
+  },
+  "devDependencies": {
     "nodemon": "^3.1.10"
   }
 }

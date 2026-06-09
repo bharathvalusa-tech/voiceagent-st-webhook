@@ -264,60 +264,6 @@ const getJobsByLocation = async (locationId, agentId, status) => {
     return jobDetails;
 };
 
-/**
- * Get jobs for a customer by phone number (calls customer lookup first)
- * Queries jobs across ALL locations the contact is associated with to avoid
- * returning jobs from an arbitrary single location.
- * @param {string} fromPhoneNumber - The phone number to search for
- * @param {string} agentId - The agent ID
- * @param {string} status - The job status filter
- * @returns {Promise<Object>} - Object containing customer info and job details
- * @throws {Error} - If customer or validation fails
- */
-const getJobsByPhone = async (fromPhoneNumber, agentId, status) => {
-    // Step 1: Get customer information first (includes all locations)
-    const customerData = await getCustomerByPhone(fromPhoneNumber, agentId);
-    
-    // Step 2: Get jobs across ALL locations the contact is associated with
-    const locations = customerData.locations || [];
-    const locationIds = locations.map(loc => loc.id).filter(Boolean);
-    
-    if (locationIds.length === 0) {
-        throw new Error('Customer has no associated locations');
-    }
-
-    const jobPromises = locationIds.map(locId =>
-        getJobsByLocation(locId, agentId, status).catch(err => {
-            console.log(`⚠️ Failed to fetch jobs for location ${locId}:`, err.message);
-            return [];
-        })
-    );
-    const jobArrays = await Promise.all(jobPromises);
-    const allJobs = jobArrays.flat();
-
-    // Deduplicate by jobId in case the same job appears under multiple locations
-    const seen = new Set();
-    const jobDetails = allJobs.filter(job => {
-        if (seen.has(job.jobId)) return false;
-        seen.add(job.jobId);
-        return true;
-    });
-    
-    return {
-        customer: {
-            name: customerData.name,
-            phone: customerData.phone,
-            email: customerData.email,
-            locations: locations,
-            // Backward compat — prefer using 'locations' array
-            locationId: customerData.locationId,
-            address: customerData.address,
-            customerId: customerData.customerId
-        },
-        jobDetails
-    };
-};
-
 const getInvoicesByJobId = async (jobId, agentId) => {
     if (!jobId) {
         throw new Error('jobId is required');
@@ -352,52 +298,6 @@ const roundTimeUpToQuarter = (date) => {
     
     console.log(`⏰ Rounded time from ${date.toLocaleTimeString()} to ${rounded.toLocaleTimeString()}`);
     return rounded;
-};
-
-/**
- * Parse address string into components
- * @param {string} addressString - Raw address string
- * @param {string} state - State name or abbreviation
- * @returns {Object} - Parsed address components
- */
-const parseAddress = (addressString, state) => {
-    console.log('Parsing address:', addressString, 'State:', state);
-    
-    // State name to abbreviation mapping
-    const stateAbbreviations = {
-        'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR',
-        'california': 'CA', 'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE',
-        'florida': 'FL', 'georgia': 'GA', 'hawaii': 'HI', 'idaho': 'ID',
-        'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA', 'kansas': 'KS',
-        'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
-        'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS',
-        'missouri': 'MO', 'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV',
-        'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
-        'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH', 'oklahoma': 'OK',
-        'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
-        'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT',
-        'vermont': 'VT', 'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
-        'wisconsin': 'WI', 'wyoming': 'WY'
-    };
-    
-    // Simple parsing - can be enhanced based on actual address formats
-    const parts = addressString.split(',').map(p => p.trim());
-    
-    // Convert state to abbreviation if it's a full name
-    let stateAbbr = state;
-    if (state && state.length > 2) {
-        stateAbbr = stateAbbreviations[state.toLowerCase()] || state.substring(0, 2).toUpperCase();
-    }
-    
-    const parsed = {
-        street: parts[0] || addressString || 'Unknown',
-        city: parts[1] || 'Unknown',
-        state: stateAbbr || 'TX',
-        postalCode: parts[parts.length - 1]?.match(/\d{4,5}/)?.[0] || '00000'
-    };
-    
-    console.log('Parsed address:', JSON.stringify(parsed));
-    return parsed;
 };
 
 /**
@@ -451,11 +351,10 @@ const createJob = async (jobData, agentId) => {
             return null;
         });
 
-        // Determine vendorId and ensure one is present from either request or config
-        const resolvedVendorId = companyId || jobConfig?.vendor_id;
-        if (!resolvedVendorId) {
-            throw new Error('Missing required field: companyId (vendorId) and no vendor_id found in job config');
-        }
+        // Determine vendorId from request or config. Missing/invalid vendorId is non-fatal —
+        // the service layer omits it from the payload when null, and falls back to a vendorId-less
+        // retry if ServiceTrade rejects it as not-found.
+        const resolvedVendorId = companyId || jobConfig?.vendor_id || null;
 
         const supabaseAuthToken = await getAuthToken(agentId);
 
@@ -482,6 +381,14 @@ const createJob = async (jobData, agentId) => {
             if (released !== null && released !== undefined) return Boolean(released);
             if (cfg !== null && cfg !== undefined) return Boolean(cfg);
             return true; // default behavior
+        })();
+        // Whether to create an appointment (and linked service request) alongside the job.
+        // Default true for backward compatibility; set create_appointment=false in
+        // servicetrade_job_configs to create Job only (dispatcher schedules manually).
+        const shouldCreateAppointment = (() => {
+            const cfg = jobConfig?.create_appointment;
+            if (cfg === null || cfg === undefined) return true;
+            return Boolean(cfg);
         })();
 
         const normalizedAppointmentTime = normalizeTimeString(appointmentTime);
@@ -539,65 +446,70 @@ const createJob = async (jobData, agentId) => {
 
         console.log('✅ Job created:', job.id);
 
-        // Create Appointment - without technician assignment
         let appointment = null;
         let serviceRequest = null;
         let appointmentErrorMessage = null;
         let serviceRequestErrorMessage = null;
-        try {
-            console.log('📅 Creating appointment for job:', job.id);
 
-            // Convert date/time to Unix timestamp (seconds)
-            const windowStart = Math.floor(appointmentDateTime.getTime() / 1000);
-            const windowEnd = windowStart + (resolvedJobDurationMinutes * 60); // duration in seconds
-            
-            appointment = await serviceTradeService.createAppointment(supabaseAuthToken, {
-                jobId: job.id,
-                windowStart: windowStart,
-                windowEnd: windowEnd,
-                techIds: resolvedTechIds,
-                serviceRequestIds: [],
-                released: resolvedReleased
-            });
-            
-            console.log('✅ Appointment created:', appointment?.id || 'success');
-            console.log('ℹ️ No technicians assigned - appointment created without technician assignment');
+        if (!shouldCreateAppointment) {
+            console.log('ℹ️ Skipping appointment and service request (create_appointment=false in job config)');
+        } else {
+            // Create Appointment - without technician assignment
+            try {
+                console.log('📅 Creating appointment for job:', job.id);
 
-            // Create service request and link it to the appointment (if appointment was created)
-            if (appointment && appointment.id) {
-                try {
-                    console.log('📋 Creating service request');
-                    console.log('📋 Service request data:', {
-                        description: description,
-                        locationId: locationId,
-                        jobId: job.id,
-                        appointmentIds: [appointment.id],
-                        serviceLineIds: resolvedServiceLineIds,
-                        serviceLineId: resolvedServiceLineId
-                    });
-                    
-                    serviceRequest = await serviceTradeService.createServiceRequest(supabaseAuthToken, {
-                        description: description,
-                        locationId: locationId,
-                        serviceLineId: resolvedServiceLineId,
-                        jobId: job.id,
-                        appointmentIds: [appointment.id]
-                    });
-                    
-                    console.log('✅ Service request created successfully:', JSON.stringify(serviceRequest, null, 2));
-                } catch (serviceRequestError) {
-                    console.error('❌ Service request creation failed:', serviceRequestError.message);
-                    console.error('❌ Service request error stack:', serviceRequestError.stack);
-                    serviceRequestErrorMessage = serviceRequestError.message || 'Service request creation failed';
-                    // Don't fail the entire job creation if service request fails
+                // Convert date/time to Unix timestamp (seconds)
+                const windowStart = Math.floor(appointmentDateTime.getTime() / 1000);
+                const windowEnd = windowStart + (resolvedJobDurationMinutes * 60); // duration in seconds
+
+                appointment = await serviceTradeService.createAppointment(supabaseAuthToken, {
+                    jobId: job.id,
+                    windowStart: windowStart,
+                    windowEnd: windowEnd,
+                    techIds: resolvedTechIds,
+                    serviceRequestIds: [],
+                    released: resolvedReleased
+                });
+
+                console.log('✅ Appointment created:', appointment?.id || 'success');
+                console.log('ℹ️ No technicians assigned - appointment created without technician assignment');
+
+                // Create service request and link it to the appointment (if appointment was created)
+                if (appointment && appointment.id) {
+                    try {
+                        console.log('📋 Creating service request');
+                        console.log('📋 Service request data:', {
+                            description: description,
+                            locationId: locationId,
+                            jobId: job.id,
+                            appointmentIds: [appointment.id],
+                            serviceLineIds: resolvedServiceLineIds,
+                            serviceLineId: resolvedServiceLineId
+                        });
+
+                        serviceRequest = await serviceTradeService.createServiceRequest(supabaseAuthToken, {
+                            description: description,
+                            locationId: locationId,
+                            serviceLineId: resolvedServiceLineId,
+                            jobId: job.id,
+                            appointmentIds: [appointment.id]
+                        });
+
+                        console.log('✅ Service request created successfully:', JSON.stringify(serviceRequest, null, 2));
+                    } catch (serviceRequestError) {
+                        console.error('❌ Service request creation failed:', serviceRequestError.message);
+                        console.error('❌ Service request error stack:', serviceRequestError.stack);
+                        serviceRequestErrorMessage = serviceRequestError.message || 'Service request creation failed';
+                        // Don't fail the entire job creation if service request fails
+                    }
+                } else {
+                    console.log('⚠️ Skipping service request creation - no appointment created');
                 }
-            } else {
-                console.log('⚠️ Skipping service request creation - no appointment created');
+            } catch (appointmentError) {
+                console.error('⚠️ Appointment creation failed:', appointmentError.message);
+                appointmentErrorMessage = appointmentError.message || 'Appointment creation failed';
+                // Don't fail the entire job creation if appointment fails
             }
-        } catch (appointmentError) {
-            console.error('⚠️ Appointment creation failed:', appointmentError.message);
-            appointmentErrorMessage = appointmentError.message || 'Appointment creation failed';
-            // Don't fail the entire job creation if appointment fails
         }
 
         if (callerContactId && !job.primaryContactId && !primaryContactId) {
@@ -654,12 +566,8 @@ module.exports = {
     getAuthToken,
     getCustomerByPhone,
     getJobsByLocation,
-    getJobsByPhone,
-    formatUnixToDateTime,
     getInvoicesByJobId,
-    createJob,
-    parseAddress,
-    roundTimeUpToQuarter
+    createJob
 };
 
 
