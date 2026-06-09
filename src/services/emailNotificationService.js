@@ -436,6 +436,7 @@ class EmailNotificationService {
     }
 
     async sendJobNotification({ settings = {}, outcome, details = {}, overrideTo = null, overrideCc = null }) {
+        console.log(`[EmailNotificationService] sendJobNotification triggered — outcome: ${outcome}, callId: ${details.callId || 'N/A'}`);
         if (!this.isNotificationEnabled(settings, outcome) && !overrideTo) {
             return { sent: false, skipped: true, reason: 'notifications_disabled' };
         }
@@ -486,7 +487,14 @@ class EmailNotificationService {
             }
         };
 
-        await sgMail.send(mail);
+        console.log(`[EmailNotificationService] Sending email — to: ${to.join(', ')}${cc.length > 0 ? `, cc: ${cc.join(', ')}` : ''}, subject: "${mail.subject}"`);
+        try {
+            await sgMail.send(mail);
+        } catch (err) {
+            const sgError = err.response?.body?.errors?.[0]?.message || err.message;
+            console.error(`[EmailNotificationService] SendGrid send failed — ${sgError}`, err);
+            throw err;
+        }
 
         return {
             sent: true,
