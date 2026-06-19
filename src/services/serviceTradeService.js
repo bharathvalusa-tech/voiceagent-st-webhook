@@ -593,5 +593,49 @@ class ServiceTradeService {
     }
 
 
+    /**
+     * Check whether the stored PHPSESSID is still valid.
+     * Calls GET /api/auth — returns true (200 OK) or false (401 expired).
+     */
+    async validateSession(authToken) {
+        try {
+            const response = await fetch(`${this.baseUrl}/auth`, {
+                method: 'GET',
+                headers: {
+                    'Cookie': `PHPSESSID=${authToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            return response.ok;
+        } catch (error) {
+            console.error('Error validating ServiceTrade session:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Re-authenticate with ServiceTrade using stored credentials.
+     * Returns the new PHPSESSID extracted from the Set-Cookie header.
+     */
+    async reAuthenticate(username, password) {
+        const response = await fetch(`${this.baseUrl}/auth`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+
+        if (!response.ok) {
+            const body = await response.text().catch(() => '');
+            throw new Error(`ServiceTrade re-auth failed: ${response.status} ${response.statusText} ${body}`);
+        }
+
+        // Extract PHPSESSID from Set-Cookie response header
+        const setCookie = response.headers.get('set-cookie') || '';
+        const match = setCookie.match(/PHPSESSID=([^;]+)/);
+        if (!match) {
+            throw new Error('Re-auth succeeded but no PHPSESSID found in Set-Cookie header');
+        }
+        return match[1];
+    }
 }
 module.exports = new ServiceTradeService();

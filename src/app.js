@@ -12,6 +12,7 @@ const stInvoiceRoutes = require('./routes/serviceTrade/invoiceDetails');
 const stCreateJobRoutes = require('./routes/serviceTrade/createJob');
 const stCreateServiceRequestRoutes = require('./routes/serviceTrade/createServiceRequest');
 const retellWebhookRoutes = require('./routes/webhook/retell');
+const stAuthRoutes = require('./routes/auth/serviceTradeAuth');
 const app = express();
 
 // CORS configuration - allow requests from any domain
@@ -41,6 +42,7 @@ app.use('/', stInvoiceRoutes);
 app.use('/', stCreateJobRoutes);
 app.use('/', stCreateServiceRequestRoutes);
 app.use('/webhook', retellWebhookRoutes);
+app.use('/auth/servicetrade', stAuthRoutes);
 // Health check endpoint
 app.get('/health', (req, res) => {
     sendSuccessResponse(res, { 

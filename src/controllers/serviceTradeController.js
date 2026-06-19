@@ -12,27 +12,41 @@ const formatUnixToDateTime = (unixTimestamp) => {
 };
 
 /**
- * Get ServiceTrade authentication token for an agent
- * @param {string} agentId - The agent ID
- * @returns {Promise<string>} - The authentication token
- * @throws {Error} - If no token is found
+ * Get a valid ServiceTrade auth token for an agent.
+ * Validates the stored PHPSESSID with GET /api/auth.
+ * If expired (401), re-authenticates with stored credentials,
+ * persists the fresh token to Supabase, and returns it.
+ * @param {string} agentId
+ * @returns {Promise<string>} valid PHPSESSID
  */
 const getAuthToken = async (agentId) => {
-    if (!agentId) {
-        throw new Error('agentId is required');
-    }
-    
-    if (!agentId.includes('agent_')) {
-        throw new Error('agentId should start with agent_');
-    }
-    
+    if (!agentId) throw new Error('agentId is required');
+    if (!agentId.includes('agent_')) throw new Error('agentId should start with agent_');
+
     const tokenData = await supabaseService.getServiceTradeToken(agentId);
-    
     if (!tokenData || tokenData.length === 0) {
         throw new Error('No ServiceTrade token found for this agent');
     }
-    
-    return tokenData[0].auth_token;
+
+    const { auth_token, st_username, st_password } = tokenData[0];
+
+    // Fast path: session still valid
+    const isValid = await serviceTradeService.validateSession(auth_token);
+    if (isValid) return auth_token;
+
+    // Session expired — re-authenticate if credentials are stored
+    console.log(`⚠️ [${agentId}] Session expired, re-authenticating...`);
+    if (!st_username || !st_password) {
+        throw new Error(
+            `Session expired for agent ${agentId} and no credentials stored. ` +
+            `Update st_username and st_password in servicetrade_tokens to enable auto-reauth.`
+        );
+    }
+
+    const newToken = await serviceTradeService.reAuthenticate(st_username, st_password);
+    await supabaseService.updateAuthToken(agentId, newToken);
+    console.log(`✅ [${agentId}] Re-authenticated successfully, fresh token stored.`);
+    return newToken;
 };
 
 // Calculate timezone offset (minutes) for a given IANA timezone versus UTC at a specific date

@@ -19,6 +19,22 @@ class SupabaseService {
         }
     }
 
+    async updateAuthToken(agentId, newToken) {
+        try {
+            const { error } = await supabase
+                .from('servicetrade_tokens')
+                .update({ auth_token: newToken })
+                .eq('agent_id', agentId);
+
+            if (error) {
+                throw new Error(`Supabase error: ${error.message}`);
+            }
+        } catch (error) {
+            console.error('Error updating ServiceTrade token in Supabase:', error);
+            throw error;
+        }
+    }
+
     async getJobConfig(agentId) {
         try {
             const { data, error } = await supabase
