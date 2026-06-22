@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Voice Agent — Tiered Customer Matching Guide</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    color: #1a1f29;
+    font-size: 10.5pt;
+    line-height: 1.5;
+    margin: 0;
+  }
+  h1 {
+    font-size: 22pt;
+    margin: 0 0 4px;
+    color: #0f172a;
+    letter-spacing: -0.3px;
+  }
+  .sub { color: #64748b; font-size: 10pt; margin: 0 0 18px; }
+  h2 {
+    font-size: 14pt;
+    margin: 26px 0 8px;
+    padding-bottom: 5px;
+    border-bottom: 2px solid #2563eb;
+    color: #1e3a8a;
+    page-break-after: avoid;
+  }
+  h3 { font-size: 11.5pt; margin: 16px 0 6px; color: #1e293b; page-break-after: avoid; }
+  p { margin: 6px 0; }
+  code {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9pt;
+    color: #be123c;
+  }
+  pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 8.6pt;
+    line-height: 1.45;
+    overflow-x: auto;
+    page-break-inside: avoid;
+  }
+  pre code { background: none; color: inherit; padding: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 9.2pt;
+    page-break-inside: avoid;
+  }
+  th {
+    background: #1e3a8a;
+    color: #fff;
+    text-align: left;
+    padding: 7px 9px;
+    font-weight: 600;
+  }
+  td { padding: 6px 9px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  .tier1 { border-left: 5px solid #16a34a; }
+  .tier2 { border-left: 5px solid #d97706; }
+  .tier3 { border-left: 5px solid #dc2626; }
+  .card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 12px 0;
+    page-break-inside: avoid;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 8.5pt;
+    font-weight: 700;
+    color: #fff;
+  }
+  .b-green { background: #16a34a; }
+  .b-amber { background: #d97706; }
+  .b-red { background: #dc2626; }
+  .b-blue { background: #2563eb; }
+  .callout {
+    background: #eff6ff;
+    border-left: 4px solid #2563eb;
+    padding: 9px 13px;
+    border-radius: 0 6px 6px 0;
+    margin: 12px 0;
+    font-size: 9.5pt;
+  }
+  .warn {
+    background: #fef2f2;
+    border-left: 4px solid #dc2626;
+  }
+  .flow {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 8.8pt;
+    white-space: pre;
+    line-height: 1.5;
+    page-break-inside: avoid;
+  }
+  .pagebreak { page-break-before: always; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  .muted { color: #64748b; }
+  .step-num {
+    display: inline-block;
+    width: 22px; height: 22px;
+    background: #2563eb; color: #fff;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 22px;
+    font-weight: 700;
+    font-size: 9.5pt;
+    margin-right: 6px;
+  }
+  footer { margin-top: 30px; font-size: 8pt; color: #94a3b8; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Tiered Customer Matching</h1>
+<p class="sub">Voice Agent &rarr; ServiceTrade Webhook &nbsp;|&nbsp; Question flow, tier rules &amp; confidence tuning</p>
+
+<div class="callout">
+  <strong>The core idea.</strong> When a call comes in, the system identifies the customer/location by comparing
+  what the caller said (phone, address, business/location name, company) against ServiceTrade records.
+  Because speech-to-text is imperfect, every comparison is <strong>fuzzy</strong>. Each candidate location is
+  assigned a <strong>confidence tier (1, 2, or 3)</strong> based on how many independent signals agree, and the
+  tier decides whether a job is auto-created, GPT-disambiguated, or sent to a human for review.
+</div>
+
+<h2>A. The Questions &mdash; in order to ask</h2>
+<p>
+  Ask the <strong>fewest</strong> questions needed and <strong>stop the moment a Tier&nbsp;1 match is reachable</strong>.
+  Fields are ordered by <em>closing power</em> &mdash; how reliably a match on that field alone (or with what's
+  already collected) lands a confident match.
+</p>
+
+<table>
+  <thead>
+    <tr><th style="width:30px">#</th><th>Ask the caller&hellip;</th><th>Why it closes the match</th><th>Tier&nbsp;1 rule it triggers</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>0</strong></td>
+      <td><em>(nothing &mdash; phone from caller&nbsp;ID)</em></td>
+      <td>Phone is captured automatically. If it maps to exactly <strong>one</strong> location, the match is done with zero questions.</td>
+      <td><code>phone_match_single_location</code></td>
+    </tr>
+    <tr>
+      <td><strong>1</strong></td>
+      <td><strong>Service address</strong></td>
+      <td>Phone&nbsp;+&nbsp;address is the strongest pairing; addresses are highly unique.</td>
+      <td><code>phone_and_address_match</code></td>
+    </tr>
+    <tr>
+      <td><strong>2</strong></td>
+      <td><strong>Business / location name</strong></td>
+      <td>Pairs with the address just given. Rescues callers whose phone isn't on file.</td>
+      <td><code>location_name_and_address_match</code></td>
+    </tr>
+    <tr>
+      <td><strong>3</strong></td>
+      <td><strong>Best callback / direct number</strong></td>
+      <td>Used as the <em>fallback phone</em> &mdash; triggers a second matching pass. Can solo-close if single-location.</td>
+      <td><code>phone_match_single_location</code></td>
+    </tr>
+    <tr>
+      <td><strong>4</strong></td>
+      <td><strong>Company name</strong></td>
+      <td>Tiebreaker only. By design it can <strong>never</strong> reach Tier&nbsp;1 alone (STT confusion, e.g. "Uptown" vs "Intown").</td>
+      <td>Feeds GPT disambiguation</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Always collect the caller's name + a callback number for the job record</strong> &mdash; even though
+  the name carries <em>no</em> tier weight (it's not used in scoring, only in the job description and the
+  "is this call actionable?" gate).
+</div>
+
+<h3>Early-exit logic for the conversation flow</h3>
+<div class="flow">phone (free)  ───────────►  single location?              ──► STOP · Tier 1
+   else ask ADDRESS  ─────────►  matches with phone?           ──► STOP · Tier 1
+      else ask BUSINESS/LOCATION ► matches with address?       ──► STOP · Tier 1
+         else ask CALLBACK NUMBER ► single location?           ──► STOP · Tier 1
+            else ask COMPANY NAME  ► hand to GPT / human review</div>
+
+<div class="callout warn">
+  <strong>Important:</strong> the webhook scores <em>whatever the call collected</em> &mdash; it has no notion of
+  "stop asking." The early-exit must live in the <strong>Retell conversation flow</strong> (a mid-call function that
+  re-checks the match after each answer). Without that, all questions are asked regardless, and the ordering only
+  decides which the caller hears first.
+</div>
+
+<div class="pagebreak"></div>
+<h2>B. The Tiered Matching</h2>
+<p>Every candidate location gets the <strong>first rule that matches</strong>, evaluated strongest-first. A tier reflects how many independent signals corroborate the match.</p>
+
+<div class="card tier1">
+  <span class="badge b-green">TIER 1</span> &nbsp; <strong>High confidence &rarr; auto-create job</strong>
+  <p class="muted" style="margin:6px 0">Two strong independent identifiers agree, or one provably-unique identifier.</p>
+  <table>
+    <thead><tr><th>Rule</th><th>What agrees</th></tr></thead>
+    <tbody>
+      <tr><td><code>phone_and_address_match</code></td><td>phone + address</td></tr>
+      <tr><td><code>location_name_and_address_match</code></td><td>location name + address</td></tr>
+      <tr><td><code>phone_match_single_location</code></td><td>phone, and it maps to only 1 location</td></tr>
+      <tr><td><code>company_location_and_address_exact</code></td><td>company + location + address all exact</td></tr>
+      <tr><td><code>location_and_company_exact</code></td><td>location + company exact (no address needed)</td></tr>
+      <tr><td><code>phone_match_with_address_similarity</code></td><td>phone + address similarity &gt; 0.5</td></tr>
+    </tbody>
+  </table>
+  <p style="margin:6px 0"><strong>Action:</strong> take the best-ranked Tier 1 candidate &rarr; cross-validate &rarr; create job. No human review.</p>
+</div>
+
+<div class="card tier2">
+  <span class="badge b-amber">TIER 2</span> &nbsp; <strong>Medium confidence &rarr; create if unambiguous, else review</strong>
+  <p class="muted" style="margin:6px 0">One solid signal, or fuzzy-but-plausible combinations. Company+address (no location) lives here on purpose.</p>
+  <table>
+    <thead><tr><th>Rule</th><th>What agrees</th></tr></thead>
+    <tbody>
+      <tr><td><code>phone_match_multiple_locations</code></td><td>phone, but maps to 2+ locations</td></tr>
+      <tr><td><code>company_and_address_exact_no_location</code></td><td>company + address, no location confirm</td></tr>
+      <tr><td><code>location_name_exact</code></td><td>location name alone</td></tr>
+      <tr><td><code>company_fuzzy_and_address</code></td><td>company fuzzy &gt; 0.6 + address</td></tr>
+      <tr><td><code>location_fuzzy_and_address</code></td><td>location fuzzy &gt; 0.8 + address</td></tr>
+      <tr><td><code>company_and_location_fuzzy</code></td><td>both fuzzy &gt; 0.8</td></tr>
+    </tbody>
+  </table>
+  <p style="margin:6px 0"><strong>Action:</strong> if all Tier 2 candidates point to the <strong>same</strong> location &rarr; create job + review note. If they differ &rarr; <strong>GPT disambiguation</strong>; if unresolved &rarr; manual review (<code>multiple_medium_confidence_matches</code>).</p>
+</div>
+
+<div class="card tier3">
+  <span class="badge b-red">TIER 3</span> &nbsp; <strong>Low confidence &rarr; never auto-create, always review</strong>
+  <p class="muted" style="margin:6px 0">A single weak signal with nothing corroborating: company exact alone, location fuzzy &gt; 0.7 alone, address alone. No signals at all &rarr; <code>no_strong_match</code>.</p>
+  <p style="margin:6px 0"><strong>Action:</strong> no job. Manual review (<code>low_confidence_matches</code>) with the top 3 candidates attached to the notification email.</p>
+</div>
+
+<h3>How the tiers gate the whole flow</h3>
+<div class="flow">findCustomerWithConfidence() → ranked candidates
+   │
+   ├─ 0 candidates ───────────────► REVIEW (no_matches)
+   │
+   ├─ any Tier 1? ─ yes → tier1[0] → cross-validate
+   │                         ├─ pass → CREATE JOB
+   │                         └─ fail → REVIEW (retell_data_mismatch)
+   │
+   ├─ any Tier 2? ─ yes → same location?
+   │                         ├─ yes → CREATE JOB + note
+   │                         └─ no  → GPT disambiguation
+   │                                    ├─ resolved → CREATE JOB
+   │                                    └─ no → REVIEW (multiple_medium_confidence_matches)
+   │
+   └─ else (Tier 3) ──────────────► REVIEW (low_confidence_matches)</div>
+
+<div class="pagebreak"></div>
+<h2>C. Setting up the confidence scores</h2>
+
+<h3>Step 1 &mdash; Normalize before comparing</h3>
+<p>All comparisons run on normalized strings, so casing/punctuation never cause a miss.</p>
+<ul>
+  <li><code>normalizePhone()</code> &mdash; strip everything but digits. <span class="muted">"(214) 555-1234" &rarr; "2145551234"</span></li>
+  <li><code>normalizeText()</code> &mdash; lowercase, drop punctuation, collapse whitespace. <span class="muted">"Dallas Fire &amp; Alarm, LLC" &rarr; "dallas fire alarm llc"</span></li>
+</ul>
+
+<h3>Step 2 &mdash; Compute a 0&ndash;1 similarity per field</h3>
+<p>Two algorithms run; <code>fuzzySimilarity()</code> takes the higher of the two (<code>Math.max</code>):</p>
+<table>
+  <thead><tr><th>Algorithm</th><th>How it scores</th><th>Best at catching</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Token (Jaccard)</strong></td><td>shared words &divide; total unique words</td><td>word-order / extra-word differences</td></tr>
+    <tr><td><strong>Bigram (Dice)</strong></td><td>shared 2-char chunks, doubled &divide; total chunks</td><td>character-level typos ("Diversetec" vs "DIVERSATEK")</td></tr>
+  </tbody>
+</table>
+<p><strong>Address</strong> gets special handling: exact &rarr; 1.0; one contains the other &rarr; 0.9; else fuzzy. A stricter <em>address query match</em> also tests search variants (with/without "St"/"Street", "N"/"North", unit numbers).</p>
+
+<h3>Step 3 &mdash; The thresholds you tune</h3>
+<p>These constants are the dials. Raise them to reduce false matches (more reviews); lower them to auto-create more aggressively (more risk).</p>
+<table>
+  <thead><tr><th>Threshold</th><th>Used for</th><th>Effect of raising it</th></tr></thead>
+  <tbody>
+    <tr><td><code>&gt; 0.95</code></td><td>Company fuzzy &rarr; Tier 1 (with location + address)</td><td>Fewer fuzzy company auto-creates</td></tr>
+    <tr><td><code>&gt; 0.9</code></td><td>Company fuzzy &rarr; Tier 2 (with address)</td><td>Stricter medium-confidence bar</td></tr>
+    <tr><td><code>&gt; 0.8</code></td><td>Location fuzzy + address; company&amp;location both fuzzy</td><td>Fewer borderline Tier 2</td></tr>
+    <tr><td><code>&gt; 0.75</code></td><td>Address-only strict threshold; cross-validation</td><td>Address-only calls harder to match</td></tr>
+    <tr><td><code>&gt; 0.7</code></td><td>Min fuzzy to stay Tier 3 (not discarded)</td><td>More candidates dropped entirely</td></tr>
+    <tr><td><code>&gt; 0.6</code></td><td>Company fuzzy + address; lenient address; cross-val company</td><td>Fewer lenient matches</td></tr>
+    <tr><td><code>&gt; 0.5</code></td><td>Address similarity + phone &rarr; Tier 1</td><td>Phone+address pairing stricter</td></tr>
+    <tr><td><code>first 5 chars</code></td><td>Company prefix match (STT drift)</td><td>n/a &mdash; change the prefix length</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Address match is adaptive:</strong> when phone or location is <em>also</em> present, address similarity only needs
+  <code>&gt; 0.6</code>; when address is the <em>only</em> non-phone identifier it must clear <code>&gt; 0.75</code>.
+  More corroboration &rarr; looser per-field bar.
+</div>
+
+<h3>Step 4 &mdash; Two safety gates after scoring</h3>
+<ul>
+  <li><strong>Cross-validation:</strong> even a Tier 1 winner must agree with at least one caller-provided field, or it's rejected as <code>retell_data_mismatch</code>.</li>
+  <li><strong>Address direct-hit narrowing:</strong> if an address search returns 2+ hits, keep only the one that also matches a name &mdash; stops a strong phone match at the wrong address from winning.</li>
+</ul>
+
+<h3>Step 5 &mdash; Tune from the logs</h3>
+<p>Every match emits a <code>matching_summary</code> log with <code>searchData</code>, per-candidate signals, tier counts and the chosen <code>tierReason</code>. Use it to:</p>
+<ul>
+  <li>Spot fields that were <em>asked but never scored</em> (collection gap).</li>
+  <li>Find <code>tierReason</code> values that auto-create too eagerly (lower confidence &rarr; raise that threshold).</li>
+  <li>Find frequent <code>low_confidence_matches</code> / <code>no_matches</code> (callers aren't giving enough &rarr; adjust the question flow in Section A).</li>
+</ul>
+
+<div class="callout warn">
+  <strong>Recommended starting policy.</strong> Keep Tier 1 strict (needs 2 signals or a unique phone). Let Tier 2
+  lean on GPT disambiguation rather than auto-creating across multiple locations. Treat every threshold change as a
+  trade between <em>fewer human reviews</em> and <em>more wrong-location jobs</em> &mdash; move one dial at a time and
+  watch the <code>matching_summary</code> logs for a week before the next change.
+</div>
+
+<footer>
+  Generated for the voiceagent-st-webhook project &nbsp;&middot;&nbsp; Source: customerMatchingService.js &amp; retell.js
+</footer>
+
+</body>
+</html>

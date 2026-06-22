@@ -422,10 +422,10 @@ const composeJobNotCreatedEmail = (details) => {
 };
 
 const INTERNAL_ALERT_RECIPIENTS = [
-    'bharath.valusa@justclara.ai',
-    'yochana@justclara.ai',
     'pavan.kalyan@justclara.ai',
-    'naveen@justclara.ai'
+    'subham.agarwal@justclara.ai',
+    'aayush.thapar@justclara.ai',
+    'bharath.valusa@justclara.ai'
 ];
 
 class EmailNotificationService {
