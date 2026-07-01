@@ -120,6 +120,30 @@ const normalizeBool = (value) => {
     return null;
 };
 
+// Reduce a phone number in any format (+1 647 557-9426, (647) 557-9426, etc.)
+// to a comparable digits-only key. NANP numbers carrying a leading country code
+// are trimmed to their last 10 digits so formatting differences never matter.
+const toPhoneDigits = (value) => {
+    const digits = String(value || '').replace(/\D/g, '');
+    return digits.length > 10 ? digits.slice(-10) : digits;
+};
+
+// Numbers for which post-call job creation is suppressed. Configured via the
+// SUPPRESS_JOB_NUMBERS env var as a comma-separated list in any format, e.g.
+// SUPPRESS_JOB_NUMBERS="+16475579426, (416) 402-2601". When the caller's
+// from_number matches one of these, no ServiceTrade job is created post-call.
+const suppressedJobNumbers = new Set(
+    (process.env.SUPPRESS_JOB_NUMBERS || '')
+        .split(',')
+        .map(toPhoneDigits)
+        .filter(Boolean)
+);
+
+const isJobSuppressedNumber = (phone) => {
+    const digits = toPhoneDigits(phone);
+    return digits.length > 0 && suppressedJobNumbers.has(digits);
+};
+
 const normalizeNumberArray = (values) => {
     if (!Array.isArray(values)) return [];
 
@@ -653,6 +677,18 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 callId,
                 agentId,
                 callType
+            });
+            return;
+        }
+
+        // --- Suppressed caller numbers (SUPPRESS_JOB_NUMBERS) ---
+        // For flagged numbers (e.g. automated alarm monitors) we never auto-create
+        // a job post-call; the decision is handled elsewhere (technician approval).
+        if (isJobSuppressedNumber(callerPhone)) {
+            logWithContext('info', 'Skipping job creation for suppressed caller number', {
+                callId,
+                agentId,
+                callerPhone
             });
             return;
         }
