@@ -120,29 +120,20 @@ const normalizeBool = (value) => {
     return null;
 };
 
-// Reduce a phone number in any format (+1 647 557-9426, (647) 557-9426, etc.)
-// to a comparable digits-only key. NANP numbers carrying a leading country code
-// are trimmed to their last 10 digits so formatting differences never matter.
-const toPhoneDigits = (value) => {
-    const digits = String(value || '').replace(/\D/g, '');
-    return digits.length > 10 ? digits.slice(-10) : digits;
-};
-
-// Numbers for which post-call job creation is suppressed. Configured via the
-// SUPPRESS_JOB_NUMBERS env var as a comma-separated list in any format, e.g.
-// SUPPRESS_JOB_NUMBERS="+16475579426, (416) 402-2601". When the caller's
-// from_number matches one of these, no ServiceTrade job is created post-call.
-const suppressedJobNumbers = new Set(
-    (process.env.SUPPRESS_JOB_NUMBERS || '')
+// Inbound agents for which post-call job creation is DISABLED. For these agents
+// (e.g. office-hours / after-hours) the job is decided live on the outbound
+// dispatch call when the technician approves it — never auto-created here.
+// Configured via the POSTCALL_JOB_DISABLED_AGENT_IDS env var as a comma-separated
+// list of agent_ids, e.g. POSTCALL_JOB_DISABLED_AGENT_IDS="agent_abc, agent_def".
+const postCallJobDisabledAgentIds = new Set(
+    (process.env.POSTCALL_JOB_DISABLED_AGENT_IDS || '')
         .split(',')
-        .map(toPhoneDigits)
+        .map((id) => id.trim())
         .filter(Boolean)
 );
 
-const isJobSuppressedNumber = (phone) => {
-    const digits = toPhoneDigits(phone);
-    return digits.length > 0 && suppressedJobNumbers.has(digits);
-};
+const isPostCallJobDisabledAgent = (agentId) =>
+    Boolean(agentId) && postCallJobDisabledAgentIds.has(agentId);
 
 const normalizeNumberArray = (values) => {
     if (!Array.isArray(values)) return [];
@@ -681,14 +672,14 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             return;
         }
 
-        // --- Suppressed caller numbers (SUPPRESS_JOB_NUMBERS) ---
-        // For flagged numbers (e.g. automated alarm monitors) we never auto-create
-        // a job post-call; the decision is handled elsewhere (technician approval).
-        if (isJobSuppressedNumber(callerPhone)) {
-            logWithContext('info', 'Skipping job creation for suppressed caller number', {
+        // --- Agent-level post-call job disable (POSTCALL_JOB_DISABLED_AGENT_IDS) ---
+        // For these inbound agents (e.g. office-hours / after-hours) we never
+        // auto-create a job post-call; the job is decided live on the outbound
+        // dispatch call when the technician approves it.
+        if (isPostCallJobDisabledAgent(agentId)) {
+            logWithContext('info', 'Skipping post-call job creation for disabled agent', {
                 callId,
-                agentId,
-                callerPhone
+                agentId
             });
             return;
         }
