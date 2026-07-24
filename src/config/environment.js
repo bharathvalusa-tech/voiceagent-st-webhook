@@ -16,6 +16,11 @@ const config = {
     notificationEmailFrom: process.env.NOTIFICATION_EMAIL_FROM || 'developer@justclara.ai',
     notificationEmailFromName: process.env.NOTIFICATION_EMAIL_FROM_NAME || 'CLARA.AI',
     nodeEnv: process.env.NODE_ENV || 'development',
+    // Adaptive Climates Apps Script /exec URL. The outbound post-call webhook POSTs
+    // the job result here (action:'job_update') so the escalation sheet row is
+    // updated with is_job_created / job_number / outcome. Same value as the
+    // Vercel ADAPTIVE_EXEC_URL that feeds the sheet.
+    adaptiveSheetExecUrl: process.env.ADAPTIVE_SHEET_EXEC_URL || '',
     matchingThresholds: {
         confidence: parseNumber(process.env.MATCH_CONFIDENCE_THRESHOLD, 80),
         fuzzySimilarity: parseNumber(process.env.FUZZY_SIMILARITY_THRESHOLD, 0.8),

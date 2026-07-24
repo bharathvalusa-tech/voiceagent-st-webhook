@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { sendSuccessResponse, sendErrorResponse } = require('../../utils/responseHelper');
-const { createJob, getAuthToken } = require('../../controllers/serviceTradeController');
-const { findCustomerWithConfidence } = require('../../services/customerMatchingService');
+const { createJobFromCallContext } = require('../../services/contextJobService');
+
+// NOTE: This HTTP endpoint is deprecated. Job creation for the Adaptive outbound
+// flow now happens post-call in POST /webhook/retell-outbound, gated on the
+// `servicetrade_job_created` variable. The route is kept (thin, delegating to the
+// shared service) only for backward compatibility; no live agent calls it.
 
 /**
  * POST /st-create-job-from-context
@@ -73,29 +77,18 @@ router.post('/st-create-job-from-context', async (req, res) => {
             return sendErrorResponse(res, 'from_number or service_address is required', 400);
         }
 
-        // Validates/refreshes the stored PHPSESSID and returns a usable token.
-        const authToken = await getAuthToken(agent_id);
-
-        const candidates = await findCustomerWithConfidence(authToken, {
-            phone: from_number,
-            name: customer_name,
-            address: service_address,
-            locationName: location_name,
-            companyName: company_name
+        const outcome = await createJobFromCallContext({
+            agent_id,
+            customer_name,
+            service_address,
+            from_number,
+            call_summary,
+            call_id,
+            location_name,
+            company_name
         });
 
-        // Pick a confident match: any Tier 1, or a Tier 2 that resolves to a
-        // single unambiguous location. Anything less → don't guess, report back.
-        let selected = candidates.find((c) => c.tier === 1 && c.locationId);
-        if (!selected) {
-            const tier2 = candidates.filter((c) => c.tier === 2 && c.locationId);
-            const uniqueLocationIds = [...new Set(tier2.map((c) => c.locationId))];
-            if (tier2.length > 0 && uniqueLocationIds.length === 1) {
-                selected = tier2[0];
-            }
-        }
-
-        if (!selected) {
+        if (outcome.status === 'no_match') {
             return sendErrorResponse(
                 res,
                 'No confident location match found for provided context',
@@ -103,28 +96,13 @@ router.post('/st-create-job-from-context', async (req, res) => {
             );
         }
 
-        const name = (customer_name || '').trim() || 'Unknown person';
-        const phonePart = from_number ? ` (${from_number})` : '';
-        const issue = (call_summary || '').trim() || 'emergency service request';
-        const description = `[EMERGENCY - TECH APPROVED]: ${name}${phonePart} reported ${issue}`;
-
-        const result = await createJob(
-            {
-                locationId: selected.locationId,
-                description,
-                callerPhoneNumber: from_number || null,
-                call_id: call_id || null
-            },
-            agent_id
-        );
-
         return sendSuccessResponse(
             res,
             {
-                ...result,
-                matchedLocationId: selected.locationId,
-                matchedLocationName: selected.locationName,
-                matchTier: selected.tier
+                ...outcome.job,
+                matchedLocationId: outcome.matchedLocationId,
+                matchedLocationName: outcome.matchedLocationName,
+                matchTier: outcome.matchTier
             },
             'Job created successfully from context',
             201

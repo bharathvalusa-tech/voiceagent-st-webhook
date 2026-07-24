@@ -76,6 +76,7 @@ const toTitleCase = (value) => String(value || '')
     .join(' ');
 
 const inferEmergencyType = (details = {}) => {
+    // Explicit, captured type — present as-is (it is fact, not a guess).
     const explicitType = details.emergencyType || details.issueType;
     if (explicitType) return explicitType;
 
@@ -83,6 +84,8 @@ const inferEmergencyType = (details = {}) => {
         return SERVICE_LINE_LABELS[details.serviceLineId];
     }
 
+    // Everything below is a heuristic guess from the text — label it as inferred
+    // so the reader does not mistake a keyword match for a confirmed category.
     const haystack = [
         details.issueDescription,
         details.callSummary,
@@ -90,11 +93,11 @@ const inferEmergencyType = (details = {}) => {
         details.companyName
     ].filter(Boolean).join(' ').toLowerCase();
 
-    if (haystack.includes('sprinkler')) return 'Sprinkler';
-    if (haystack.includes('alarm')) return 'Alarm';
-    if (haystack.includes('fire')) return 'Fire Emergency';
-    if (details.priority === 'Emergency') return 'Emergency Dispatch';
-    return 'Service Request';
+    if (haystack.includes('sprinkler')) return 'Sprinkler (inferred)';
+    if (haystack.includes('alarm')) return 'Alarm (inferred)';
+    if (haystack.includes('fire')) return 'Fire Emergency (inferred)';
+    if (details.priority === 'Emergency') return 'Emergency Dispatch (inferred)';
+    return 'Service Request (inferred)';
 };
 
 const normalizeServiceTradeJobLink = (value) => {

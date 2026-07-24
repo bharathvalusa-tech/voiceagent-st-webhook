@@ -13,6 +13,7 @@ const stCreateJobRoutes = require('./routes/serviceTrade/createJob');
 const stCreateJobFromContextRoutes = require('./routes/serviceTrade/createJobFromContext');
 const stCreateServiceRequestRoutes = require('./routes/serviceTrade/createServiceRequest');
 const retellWebhookRoutes = require('./routes/webhook/retell');
+const retellOutboundWebhookRoutes = require('./routes/webhook/retellOutbound');
 const stAuthRoutes = require('./routes/auth/serviceTradeAuth');
 const app = express();
 
@@ -44,6 +45,7 @@ app.use('/', stCreateJobRoutes);
 app.use('/', stCreateJobFromContextRoutes);
 app.use('/', stCreateServiceRequestRoutes);
 app.use('/webhook', retellWebhookRoutes);
+app.use('/webhook', retellOutboundWebhookRoutes);
 app.use('/auth/servicetrade', stAuthRoutes);
 // Health check endpoint
 app.get('/health', (req, res) => {
