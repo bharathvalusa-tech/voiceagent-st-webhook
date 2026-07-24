@@ -125,15 +125,17 @@ const normalizeBool = (value) => {
 // dispatch call when the technician approves it — never auto-created here.
 // Configured via the POSTCALL_JOB_DISABLED_AGENT_IDS env var as a comma-separated
 // list of agent_ids, e.g. POSTCALL_JOB_DISABLED_AGENT_IDS="agent_abc, agent_def".
+// Normalized (trimmed + lowercased) so a stray space or case difference between
+// the env value and the incoming webhook agent_id can't silently defeat the gate.
 const postCallJobDisabledAgentIds = new Set(
     (process.env.POSTCALL_JOB_DISABLED_AGENT_IDS || '')
         .split(',')
-        .map((id) => id.trim())
+        .map((id) => id.trim().toLowerCase())
         .filter(Boolean)
 );
 
 const isPostCallJobDisabledAgent = (agentId) =>
-    Boolean(agentId) && postCallJobDisabledAgentIds.has(agentId);
+    Boolean(agentId) && postCallJobDisabledAgentIds.has(String(agentId).trim().toLowerCase());
 
 const normalizeNumberArray = (values) => {
     if (!Array.isArray(values)) return [];
@@ -440,11 +442,15 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                     : null) ||
                 null;
 
+            // Prefer the verbatim capture (raw_issue_text) over any generalized
+            // summary so the exact issue/alarm text (fault codes and all) reaches
+            // the job description and notification email unmodified.
             const issueDescription =
+                sourceExtracted?.raw_issue_text ||
                 sourceExtracted?.issue_description ||
-                sourceAnalysis?.call_summary ||
                 sourceExtracted?.callSummary ||
                 sourceExtracted?.call_summary ||
+                sourceAnalysis?.call_summary ||
                 'Service request from call';
 
             const callSummary =
