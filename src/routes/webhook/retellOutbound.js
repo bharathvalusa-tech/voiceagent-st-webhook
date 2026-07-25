@@ -78,7 +78,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * the webhook. Skips quietly if the exec URL is unset or we have no
  * inbound_call_id to key the row.
  */
-async function notifySheet({ inboundCallId, isJobCreated, jobNumber, outcome }) {
+async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNumber, outcome }) {
     const url = config.adaptiveSheetExecUrl;
     if (!url) {
         console.log('[retell-outbound] ADAPTIVE_SHEET_EXEC_URL not set — skipping sheet update');
@@ -92,6 +92,9 @@ async function notifySheet({ inboundCallId, isJobCreated, jobNumber, outcome }) 
     const body = JSON.stringify({
         action: 'job_update',
         inbound_call_id: inboundCallId,
+        // WS-5: the outbound (escalation) call's own id, so GAS can step-label the
+        // OUTCOME trail entry (call1/call2/call3) by matching RESPONSE_CALL_ID_*.
+        outbound_call_id: outboundCallId || '',
         is_job_created: Boolean(isJobCreated),
         job_number: jobNumber || '',
         outcome: outcome || ''
@@ -163,9 +166,22 @@ router.post('/retell-outbound', async (req, res) => {
         timestamp: call.start_timestamp || Date.now()
     });
 
+    // WS-6: the client-facing escalation email — now with the full call log +
+    // transcripts of EVERY escalated call — is sent once by the GAS layer at the
+    // terminal state (job created / answered-and-declined / max-attempts). The
+    // per-outbound-call client emails here are therefore retired to avoid
+    // duplicates and no-answer-call spam. notifySheet (write-back) and
+    // alertInternal (staff error alerts) are unchanged. Flip this flag to
+    // re-enable the legacy per-call ServiceTrade job-link emails from this service.
+    const SEND_CLIENT_EMAILS_FROM_OUTBOUND = false;
+
     // Send the client job email (gated inside sendJobNotification by
     // send_job_email / send_job_fail_email). Never throws.
     const sendJobEmail = async (outcome, extraDetails = {}) => {
+        if (!SEND_CLIENT_EMAILS_FROM_OUTBOUND) {
+            console.log(`[retell-outbound] WS-6: client ${outcome} email suppressed here — GAS sends the consolidated escalation email with transcripts`);
+            return;
+        }
         try {
             const settings = await getSettings();
             if (!settings) {
@@ -235,7 +251,7 @@ router.post('/retell-outbound', async (req, res) => {
         if (jobApproved !== true) {
             console.log(`[retell-outbound] servicetrade_job_created !== true (raw: ${JSON.stringify(custom.servicetrade_job_created)}) — no job for call ${callId}, agent ${agentId}`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.declined }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.declined }),
                 sendJobEmail('job_not_created', { reasonCode: 'tech_declined', reasonLabel: 'Technician Declined', reasonMessage: OUTCOMES.declined })
             ]);
             return sendSuccessResponse(
@@ -249,7 +265,7 @@ router.post('/retell-outbound', async (req, res) => {
         if (!inboundAgentId) {
             console.error(`[retell-outbound] approved but no ServiceTrade agent id (set ST_CONTEXT_DEFAULT_AGENT_ID) for call ${callId}`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
                 alertInternal('No ServiceTrade config agent id available (ST_CONTEXT_DEFAULT_AGENT_ID unset)')
             ]);
             return sendSuccessResponse(
@@ -273,7 +289,7 @@ router.post('/retell-outbound', async (req, res) => {
         } catch (createErr) {
             console.error(`[retell-outbound] job creation threw for call ${callId}: ${createErr.message || createErr}`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
                 sendJobEmail('job_not_created', { reasonCode: 'internal_error', reasonLabel: 'Job Creation Error', reasonMessage: OUTCOMES.error }),
                 alertInternal(createErr.message || String(createErr))
             ]);
@@ -283,7 +299,7 @@ router.post('/retell-outbound', async (req, res) => {
         if (jobResult.status === 'no_match') {
             console.error(`[retell-outbound] tech approved but no confident location match for call ${callId} (agent ${inboundAgentId})`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match }),
                 sendJobEmail('job_not_created', { reasonCode: 'no_matches', reasonLabel: 'No Location Match', reasonMessage: OUTCOMES.no_match })
             ]);
             return sendSuccessResponse(
@@ -298,7 +314,7 @@ router.post('/retell-outbound', async (req, res) => {
         const jobNumber = job.jobNumber || '';
         console.log(`[retell-outbound] job created for call ${callId}: location ${jobResult.matchedLocationName} (tier ${jobResult.matchTier}), job_number ${jobNumber}`);
         await Promise.allSettled([
-            notifySheet({ inboundCallId, isJobCreated: true, jobNumber, outcome: OUTCOMES.created }),
+            notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: true, jobNumber, outcome: OUTCOMES.created }),
             sendJobEmail('job_created', { jobId: job.jobId, jobUri: job.jobUri, jobNumber })
         ]);
         return sendSuccessResponse(

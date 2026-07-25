@@ -33,8 +33,33 @@ src/
 ### POST /webhook/retell
 Handles Retell `call_analyzed` events, validates address, performs matching, and creates a job if confidence >= threshold.
 
+### POST /webhook/retell-outbound
+Handles the post-call event from the **outbound dispatch** agent (Adaptive Climate escalation). On technician approval it creates the ServiceTrade job and posts a `job_update` back to the escalation sheet.
+
 ### GET /health
 Health check endpoint.
+
+## Adaptive Climate escalation pipeline (spans two other components)
+
+Most accounts use the self-contained flow above (Retell → this service → ServiceTrade → email). **Adaptive Climate** is different: emergency calls run an escalation/dispatch pipeline that also involves the **`vercel-webhook-integration`** repo and a **Google Apps Script** web app.
+
+- **`vercel-webhook-integration`** (Python — `api/adaptiveclimate.py`): a Vercel function that receives the forwarded Retell `call_analyzed` event, extracts/normalises the caller + emergency fields, looks up the on-call tech, and POSTs the row to the Apps Script web app.
+- **Google Apps Script** (`adaptiveclimate.gs`, deployed separately as a `/exec` web app): writes the row to the tracking Google Sheet and runs the outbound escalation — calling the on-call tech, then fallback contacts, until someone answers.
+
+**Data flow:**
+
+```
+Retell (inbound) → this service  POST /webhook/retell   (main router; forwardToApiGateway)
+   → vercel-webhook-integration  api/adaptiveclimate.py
+      → Google Apps Script web app → Google Sheet (row created)
+         → GAS places the outbound "dispatch" call(s) to the technician
+            → this service  POST /webhook/retell-outbound   (job decision)
+               → job_update written back to the sheet
+```
+
+**Recent Adaptive-specific changes:** escalation now stops on any *answered* call (not just transfer), a hard 45-min cooldown for automated alarm callers, de-duplication of re-delivered calls, and a single consolidated client email with the call log + transcripts of every escalation call — sent by the Apps Script layer, so the per-call emails here are retired (`SEND_CLIENT_EMAILS_FROM_OUTBOUND` in `retellOutbound.js`).
+
+See **[`docs/adaptive-call-flow.md`](docs/adaptive-call-flow.md)** for the full Adaptive pipeline (field lifecycle, simultaneous-webhook handling). The generic non-Adaptive flow is in **[`docs/standard-call-flow.md`](docs/standard-call-flow.md)**.
 
 ## Environment Variables
 
