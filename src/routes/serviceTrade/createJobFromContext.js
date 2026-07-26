@@ -54,7 +54,7 @@ router.post('/st-create-job-from-context', async (req, res) => {
             return undefined;
         };
 
-        const agent_id = pick('agent_id', 'inbound_agent_id') || process.env.ST_CONTEXT_DEFAULT_AGENT_ID;
+        const agent_id = pick('agent_id', 'inbound_agent_id');
         const customer_name = pick('customer_name', 'caller_name', 'name');
         const service_address = pick('service_address', 'customer_address', 'address');
         const from_number = pick('from_number', 'caller_phone', 'phone');
