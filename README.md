@@ -80,6 +80,28 @@ RETELL_API_KEY=your_retell_api_key_here
 GOOGLE_MAPS_KEY=your_google_maps_key_here
 MATCH_CONFIDENCE_THRESHOLD=80
 FUZZY_SIMILARITY_THRESHOLD=0.8
+INTERNAL_ALERT_RECIPIENTS=pavan.kalyan@justclara.ai,subham.agarwal@justclara.ai
+POSTCALL_JOB_DISABLED_AGENT_IDS=agent_b2c640200a45d2f4b7d8ad8d28,agent_052cc725604f449c8725ef2718
+```
+
+### `INTERNAL_ALERT_RECIPIENTS`
+
+Recipients of the **internal error/alert emails** sent by `sendInternalAlert` (`src/services/emailNotificationService.js`) when a call fails or a job cannot be created. Accepts a **comma- or semicolon-separated** list of addresses; whitespace and duplicates are ignored. These are the internal engineering/ops team addresses, distinct from the client-facing `emailto`/`ccmail` recipients configured per-agent in the `servicetrade_tokens` table.
+
+If unset, it falls back to the built-in team list in `src/config/environment.js`, so existing deployments behave unchanged. Set this to override without a code change.
+
+```env
+INTERNAL_ALERT_RECIPIENTS="alice@justclara.ai, bob@justclara.ai; carol@justclara.ai"
+```
+
+### `POSTCALL_JOB_DISABLED_AGENT_IDS`
+
+Comma-separated list of **inbound `agent_id`s for which post-call ServiceTrade job creation is disabled**. For any agent in this list, the inbound `/webhook/retell` handler will **not** auto-create a job after the call.
+
+This is the mechanism behind the Adaptive Climate flow described above: the main router, office-hours, and after-hours agents are all listed here, so no inbound agent ever creates a job. Instead, the job is created only by `POST /webhook/retell-outbound` **after the technician approves it** on the outbound dispatch call. Add an agent's id here whenever job creation must be gated behind human/technician approval rather than happening automatically at end of call.
+
+```env
+POSTCALL_JOB_DISABLED_AGENT_IDS="agent_b2c640200a45d2f4b7d8ad8d28,agent_052cc725604f449c8725ef2718,agent_efbe503faedf1bf516f961979f"
 ```
 
 ## Installation
