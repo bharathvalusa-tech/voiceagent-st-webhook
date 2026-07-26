@@ -424,12 +424,9 @@ const composeJobNotCreatedEmail = (details) => {
     };
 };
 
-const INTERNAL_ALERT_RECIPIENTS = [
-    'pavan.kalyan@justclara.ai',
-    'subham.agarwal@justclara.ai',
-    'aayush.thapar@justclara.ai',
-    'bharath.valusa@justclara.ai'
-];
+// Recipients of internal error/alert emails, configurable via the
+// INTERNAL_ALERT_RECIPIENTS env var (see src/config/environment.js).
+const INTERNAL_ALERT_RECIPIENTS = config.internalAlertRecipients;
 
 class EmailNotificationService {
     constructor() {
