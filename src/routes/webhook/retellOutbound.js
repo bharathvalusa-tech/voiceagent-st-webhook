@@ -32,7 +32,7 @@ const supabaseService = require('../../services/supabaseService');
 const OUTCOMES = {
     created: 'job created — tech approved',
     declined: 'no job — tech declined',
-    no_match: 'no job — tech approved but no ServiceTrade location match',
+    no_match: 'no job created — no valid ServiceTrade location (tech approved)',
     error: 'no job — error creating job'
 };
 
@@ -132,7 +132,7 @@ router.post('/retell-outbound', async (req, res) => {
     let vars = {};
     let callId = '';
     let inboundCallId = '';
-    let inboundAgentId = '';
+    let configAgentId = '';
 
     // ---- per-request helpers (close over the vars above) ----
 
@@ -144,10 +144,10 @@ router.post('/retell-outbound', async (req, res) => {
         if (_settingsLoaded) return _settings;
         _settingsLoaded = true;
         try {
-            const tokenData = inboundAgentId ? await supabaseService.getServiceTradeToken(inboundAgentId) : null;
+            const tokenData = configAgentId ? await supabaseService.getServiceTradeToken(configAgentId) : null;
             _settings = (tokenData && tokenData[0]) || null;
         } catch (e) {
-            console.error(`[retell-outbound] settings load failed for ${inboundAgentId}: ${e.message || e}`);
+            console.error(`[retell-outbound] settings load failed for ${configAgentId}: ${e.message || e}`);
             _settings = null;
         }
         return _settings;
@@ -155,7 +155,7 @@ router.post('/retell-outbound', async (req, res) => {
 
     const buildBaseDetails = () => ({
         callId: inboundCallId || callId,
-        agentId: inboundAgentId,
+        agentId: configAgentId,
         customerName: vars.customer_name || vars.customerName,
         callerPhone: vars.from_number || vars.fromNumber,
         serviceAddress: vars.customer_address || vars.service_address,
@@ -185,7 +185,7 @@ router.post('/retell-outbound', async (req, res) => {
         try {
             const settings = await getSettings();
             if (!settings) {
-                console.log(`[retell-outbound] no ST settings for ${inboundAgentId} — skipping ${outcome} email`);
+                console.log(`[retell-outbound] no ST settings for ${configAgentId} — skipping ${outcome} email`);
                 return;
             }
             await emailNotificationService.sendJobNotification({
@@ -204,7 +204,7 @@ router.post('/retell-outbound', async (req, res) => {
             const settings = await getSettings();
             await emailNotificationService.sendInternalAlert({
                 callId: inboundCallId || callId,
-                agentId: inboundAgentId,
+                agentId: configAgentId,
                 companyName: settings && settings.Name,
                 errorType: 'Outbound job creation error',
                 errorMessage
@@ -222,10 +222,12 @@ router.post('/retell-outbound', async (req, res) => {
         const agentId = call.agent_id || body.agent_id || '';
         vars = call.retell_llm_dynamic_variables || {};
         inboundCallId = vars.inbound_call_id || vars.inboundCallId || '';
-        // ServiceTrade config owner. GAS no longer injects this per-row; it is
-        // resolved from the webhook env (ST_CONTEXT_DEFAULT_AGENT_ID) for Adaptive,
-        // with the legacy dynamic-variable kept as a fallback if ever present.
-        inboundAgentId = vars.inbound_agent_id || vars.inboundAgentId || process.env.ST_CONTEXT_DEFAULT_AGENT_ID || '';
+        // ServiceTrade config owner = the OUTBOUND dispatch agent's own id. Its
+        // `servicetrade_tokens` + `servicetrade_job_configs` rows (per tenant) supply
+        // the token/job config. No global env fallback — a missing row must fail loudly
+        // (see the createJobFromCallContext catch below) rather than silently create the
+        // job under some other tenant's ServiceTrade account.
+        configAgentId = agentId;
 
         // Only the post-call analysis event carries servicetrade_job_created.
         if (event && event !== 'call_analyzed') {
@@ -262,11 +264,11 @@ router.post('/retell-outbound', async (req, res) => {
             );
         }
 
-        if (!inboundAgentId) {
-            console.error(`[retell-outbound] approved but no ServiceTrade agent id (set ST_CONTEXT_DEFAULT_AGENT_ID) for call ${callId}`);
+        if (!configAgentId) {
+            console.error(`[retell-outbound] approved but no outbound agent id on the call payload for call ${callId}`);
             await Promise.allSettled([
                 notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
-                alertInternal('No ServiceTrade config agent id available (ST_CONTEXT_DEFAULT_AGENT_ID unset)')
+                alertInternal('No ServiceTrade config agent id available (call.agent_id missing from the outbound webhook payload)')
             ]);
             return sendSuccessResponse(
                 res,
@@ -279,7 +281,7 @@ router.post('/retell-outbound', async (req, res) => {
         let jobResult;
         try {
             jobResult = await createJobFromCallContext({
-                agent_id: inboundAgentId,
+                agent_id: configAgentId,
                 customer_name: vars.customer_name || vars.customerName,
                 service_address: vars.customer_address || vars.service_address,
                 from_number: vars.from_number || vars.fromNumber,
@@ -297,7 +299,7 @@ router.post('/retell-outbound', async (req, res) => {
         }
 
         if (jobResult.status === 'no_match') {
-            console.error(`[retell-outbound] tech approved but no confident location match for call ${callId} (agent ${inboundAgentId})`);
+            console.error(`[retell-outbound] tech approved but no confident location match for call ${callId} (agent ${configAgentId})`);
             await Promise.allSettled([
                 notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match }),
                 sendJobEmail('job_not_created', { reasonCode: 'no_matches', reasonLabel: 'No Location Match', reasonMessage: OUTCOMES.no_match })

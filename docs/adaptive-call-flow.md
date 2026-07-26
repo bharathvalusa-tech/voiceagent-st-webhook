@@ -115,11 +115,13 @@ The **only** place a job is created is the outbound post-call webhook
 - creates a job **only** when the technician approved it on the dispatch call —
   `servicetrade_job_created === true` (`:245`).
 
-It resolves the ServiceTrade config owner as `inbound_agent_id || ST_CONTEXT_DEFAULT_AGENT_ID`
-→ `agent_efbe…979f` and creates the job under **that** agent's `servicetrade_tokens` +
-`servicetrade_job_configs` row. Being in the disabled list only blocks that agent's
-*inbound* handler from creating — it does **not** restrict its token; the outbound path
-borrows it purely as the shared ServiceTrade-account owner.
+It resolves the ServiceTrade config owner from the **outbound dispatch agent's own id**
+(`call.agent_id`) and creates the job under **that** agent's `servicetrade_tokens` +
+`servicetrade_job_configs` row. Each tenant's outbound agent has its own pair of rows
+(config lives in Supabase, per-tenant) — there is **no** global default agent id. If the
+outbound agent has no row, `getAuthToken` throws → the webhook 500s + fires an internal
+alert (`retellOutbound.js:289-296`); this is deliberate, so a misconfig surfaces loudly
+instead of silently creating the job under the wrong ServiceTrade account.
 
 > **No tool runs on the outbound call.** The technician's "yes" only sets the post-call
 > variable `servicetrade_job_created`; the job is created afterwards by the webhook. (A
@@ -261,9 +263,9 @@ call2 - no job — tech declined
 |-------|-----|---------|
 | voiceagent-st-webhook | `API_GATEWAY_URL` | Vercel `adaptiveclimate.py` endpoint |
 | voiceagent-st-webhook | `ADAPTIVE_SHEET_EXEC_URL` | GAS web app (`job_update` write-back) |
-| voiceagent-st-webhook | `ST_CONTEXT_DEFAULT_AGENT_ID` | ServiceTrade config owner (`agent_efbe…979f`) the outbound webhook creates jobs under |
+| voiceagent-st-webhook | *(none — ST config owner)* | resolved per-tenant from the **outbound agent's own id** (`call.agent_id`) → its `servicetrade_tokens` + `servicetrade_job_configs` rows. No global default env var (removed); missing row → loud 500. See §2.1 |
 | voiceagent-st-webhook | `POSTCALL_JOB_DISABLED_AGENT_IDS` | inbound agents blocked from post-call job creation (all 3 Adaptive inbound agents) — see §2.1 |
-| GAS `CONFIG` | `ST_MATCH_URL` | pre-flight location check endpoint (`voiceagent-st-webhook /st-match-location`) — see §4 |
+| GAS `CONFIG` | `ST_MATCH_URL` | pre-flight location check endpoint (`voiceagent-st-webhook /st-match-location`); GAS passes `agent_id = RETELL_AGENT_ID` (the outbound agent) — see §4 |
 | vercel-webhook-integration | `ADAPTIVE_EXEC_URL` | GAS web app (inbound row create) |
 | vercel-webhook-integration | `RETELL_API_KEY`, `FALLBACK_TECH_EMAIL/PHONE` | Retell re-fetch + tech fallback |
 | GAS `CONFIG` | `RETELL_AGENT_ID` | outbound dispatch agent (`agent_c412…`) |
