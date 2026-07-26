@@ -16,7 +16,9 @@ const { matchLocationFromCallContext } = require('../../services/contextJobServi
  * job creation uses, so this verdict and the eventual create verdict can't drift.
  *
  * Required:
- * - agent_id (or inbound_agent_id), else falls back to ST_CONTEXT_DEFAULT_AGENT_ID
+ * - agent_id (or inbound_agent_id) — the ServiceTrade config owner. For Adaptive the
+ *   GAS gate passes the OUTBOUND dispatch agent id (CONFIG.RETELL_AGENT_ID) so this
+ *   resolves the same row the post-call job creation will use. No global default.
  * - one of from_number / service_address (needed to match a location)
  *
  * Optional: customer_name, location_name, company_name
@@ -45,7 +47,7 @@ router.post('/st-match-location', async (req, res) => {
             return undefined;
         };
 
-        const agent_id = pick('agent_id', 'inbound_agent_id') || process.env.ST_CONTEXT_DEFAULT_AGENT_ID;
+        const agent_id = pick('agent_id', 'inbound_agent_id');
         const customer_name = pick('customer_name', 'caller_name', 'name');
         const service_address = pick('service_address', 'customer_address', 'address');
         const from_number = pick('from_number', 'caller_phone', 'phone');
