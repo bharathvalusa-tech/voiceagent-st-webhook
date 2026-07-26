@@ -100,6 +100,38 @@
    - If `is_emergency`: cooldown check (§4), then `initializeAutomationWithEmail()`
      (tech email) + `processEscalationRowWithEmail()` (first call immediately).
 
+### 2.1 Job-creation authority — the technician gates every job
+
+For Adaptive, **no inbound agent ever creates a ServiceTrade job.** All three inbound
+agents — main router (`agent_b2c6…`), office-hours (`agent_052c…`), and after-hours
+(`agent_efbe…979f`) — are listed in `POSTCALL_JOB_DISABLED_AGENT_IDS`, so the inbound
+handler `src/routes/webhook/retell.js` hits its `isPostCallJobDisabledAgent(agentId)`
+check (`:685`), returns early, and creates nothing.
+
+The **only** place a job is created is the outbound post-call webhook
+`src/routes/webhook/retellOutbound.js`, which:
+
+- does **not** consult `POSTCALL_JOB_DISABLED_AGENT_IDS` at all, and
+- creates a job **only** when the technician approved it on the dispatch call —
+  `servicetrade_job_created === true` (`:245`).
+
+It resolves the ServiceTrade config owner as `inbound_agent_id || ST_CONTEXT_DEFAULT_AGENT_ID`
+→ `agent_efbe…979f` and creates the job under **that** agent's `servicetrade_tokens` +
+`servicetrade_job_configs` row. Being in the disabled list only blocks that agent's
+*inbound* handler from creating — it does **not** restrict its token; the outbound path
+borrows it purely as the shared ServiceTrade-account owner.
+
+> **No tool runs on the outbound call.** The technician's "yes" only sets the post-call
+> variable `servicetrade_job_created`; the job is created afterwards by the webhook. (A
+> former in-call `create_service_trade_job` tool was removed — it created jobs without
+> going through the post-call gate and 500'd with "No ServiceTrade token found" because it
+> looked up the token by the *outbound* agent's own id, which has no `servicetrade_tokens`
+> row. Adding such a row would be dead data: nothing on the post-call path reads by the
+> outbound agent id.)
+
+**Net effect: a job exists only after the tech says yes on the outbound call** — there is
+no inbound or in-call path to create one.
+
 ## 3. The outbound "dispatch" call — the three offers
 
 Each escalation call is placed by GAS via Retell `create-phone-call`
@@ -136,11 +168,23 @@ offers**:
      answered → stop; pending → wait; no answer → mark complete + send the
      "no one reached" client email (WS-6).
   3. **Delay gate** (`canMakeCall`, `DELAY_MINUTES = 5`).
-  4. **First / next call** — `checkAnsweredAndComplete(callId, stepN)` on the prior
+  4. **Pre-flight ServiceTrade location gate (first call only)** — before the very
+     first escalation call, `matchesServiceTradeLocation()` POSTs to
+     `voiceagent-st-webhook /st-match-location` (`CONFIG.ST_MATCH_URL`). If the caller's
+     address can't be confidently matched to a ServiceTrade location, the post-call job
+     would only fail — so **no call is placed**: the row is marked terminal
+     (`make_call=false`, `escalation_complete=true`, `is_job_created=false`), an outcome
+     `no call — address not matched to a ServiceTrade location; manual follow-up needed`
+     is appended, and the manual-review client email is sent. **Fail-open:** any endpoint
+     error / non-200 → the call is placed anyway (a transient outage never suppresses a
+     real emergency). Uses the same matcher as post-call creation, so the gate's verdict
+     and the eventual create verdict can't drift.
+  5. **First / next call** — `checkAnsweredAndComplete(callId, stepN)` on the prior
      call returns `stop` | `pending` | `continue`; on `continue` (no answer) the
      next contact is dialed and the counter advances.
-- **Stop conditions:** answered call (WS-1) · job created (`handleJobUpdate`) ·
-  automated-caller cooldown (WS-2) · max attempts exhausted.
+- **Stop conditions:** no ServiceTrade location match (pre-flight gate, first call) ·
+  answered call (WS-1) · job created (`handleJobUpdate`) · automated-caller cooldown
+  (WS-2) · max attempts exhausted.
 
 ## 5. Outbound write-back — `handleJobUpdate`
 
@@ -217,7 +261,9 @@ call2 - no job — tech declined
 |-------|-----|---------|
 | voiceagent-st-webhook | `API_GATEWAY_URL` | Vercel `adaptiveclimate.py` endpoint |
 | voiceagent-st-webhook | `ADAPTIVE_SHEET_EXEC_URL` | GAS web app (`job_update` write-back) |
-| voiceagent-st-webhook | `ST_CONTEXT_DEFAULT_AGENT_ID` | ServiceTrade config owner |
+| voiceagent-st-webhook | `ST_CONTEXT_DEFAULT_AGENT_ID` | ServiceTrade config owner (`agent_efbe…979f`) the outbound webhook creates jobs under |
+| voiceagent-st-webhook | `POSTCALL_JOB_DISABLED_AGENT_IDS` | inbound agents blocked from post-call job creation (all 3 Adaptive inbound agents) — see §2.1 |
+| GAS `CONFIG` | `ST_MATCH_URL` | pre-flight location check endpoint (`voiceagent-st-webhook /st-match-location`) — see §4 |
 | vercel-webhook-integration | `ADAPTIVE_EXEC_URL` | GAS web app (inbound row create) |
 | vercel-webhook-integration | `RETELL_API_KEY`, `FALLBACK_TECH_EMAIL/PHONE` | Retell re-fetch + tech fallback |
 | GAS `CONFIG` | `RETELL_AGENT_ID` | outbound dispatch agent (`agent_c412…`) |
