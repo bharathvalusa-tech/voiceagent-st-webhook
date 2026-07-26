@@ -36,6 +36,9 @@ Handles Retell `call_analyzed` events, validates address, performs matching, and
 ### POST /webhook/retell-outbound
 Handles the post-call event from the **outbound dispatch** agent (Adaptive Climate escalation). On technician approval it creates the ServiceTrade job and posts a `job_update` back to the escalation sheet.
 
+### POST /st-match-location
+Pre-flight, match-only location check (no job created). Given call context (`service_address`, `from_number`, `customer_name`), returns `{ matched, locationId, locationName, tier }` using the same matcher as job creation. The Adaptive GAS escalation calls this before the first outbound call so it never dials the technician for an address that has no ServiceTrade location.
+
 ### GET /health
 Health check endpoint.
 
@@ -57,7 +60,9 @@ Retell (inbound) → this service  POST /webhook/retell   (main router; forwardT
                → job_update written back to the sheet
 ```
 
-**Recent Adaptive-specific changes:** escalation now stops on any *answered* call (not just transfer), a hard 45-min cooldown for automated alarm callers, de-duplication of re-delivered calls, and a single consolidated client email with the call log + transcripts of every escalation call — sent by the Apps Script layer, so the per-call emails here are retired (`SEND_CLIENT_EMAILS_FROM_OUTBOUND` in `retellOutbound.js`).
+**Job-creation authority (important):** for Adaptive, **no inbound agent ever creates a ServiceTrade job** — the main router, office-hours, and after-hours agents are all in `POSTCALL_JOB_DISABLED_AGENT_IDS`, so the inbound handler (`retell.js:685`) creates nothing. A job is created **only** by `POST /webhook/retell-outbound`, and **only** after the technician approves it on the outbound dispatch call (`servicetrade_job_created === true`). That webhook creates the job under the shared ServiceTrade owner `ST_CONTEXT_DEFAULT_AGENT_ID` (`agent_efbe…979f`); the outbound agent's own id is never used for a token/config lookup. So there is no inbound or in-call path to create a job — the tech gates every one. See §2.1 of the flow doc.
+
+**Recent Adaptive-specific changes:** escalation now stops on any *answered* call (not just transfer), a hard 45-min cooldown for automated alarm callers, de-duplication of re-delivered calls, a single consolidated client email with the call log + transcripts of every escalation call (sent by the Apps Script layer, so the per-call emails here are retired — `SEND_CLIENT_EMAILS_FROM_OUTBOUND` in `retellOutbound.js`), and a **pre-flight ServiceTrade location gate** (`/st-match-location`) that skips the outbound call entirely when the caller's address matches no ServiceTrade location.
 
 See **[`docs/adaptive-call-flow.md`](docs/adaptive-call-flow.md)** for the full Adaptive pipeline (field lifecycle, simultaneous-webhook handling). The generic non-Adaptive flow is in **[`docs/standard-call-flow.md`](docs/standard-call-flow.md)**.
 

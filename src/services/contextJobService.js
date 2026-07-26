@@ -2,6 +2,75 @@ const { createJob, getAuthToken } = require('../controllers/serviceTradeControll
 const { findCustomerWithConfidence } = require('./customerMatchingService');
 
 /**
+ * Resolve a confident ServiceTrade location from raw call context — WITHOUT
+ * creating a job. Shared by createJobFromCallContext (below) and the match-only
+ * POST /st-match-location route, so a pre-flight gate and the eventual job
+ * creation can never disagree about whether a location matches.
+ *
+ * The lookup runs under the ORIGINAL inbound agent's ServiceTrade config, so
+ * `agent_id` must be that inbound agent's id (the outbound dispatch agent has
+ * no config of its own).
+ *
+ * @param {Object} fields
+ * @param {string} fields.agent_id        inbound agent id owning the ST token/config (required)
+ * @param {string} [fields.customer_name]
+ * @param {string} [fields.service_address]
+ * @param {string} [fields.from_number]
+ * @param {string} [fields.location_name]
+ * @param {string} [fields.company_name]
+ * @returns {Promise<{status:'matched', locationId:*, locationName:*, tier:*}
+ *                   | {status:'no_match'}>}
+ * Throws only on unexpected errors (auth/network); the caller decides how to surface those.
+ */
+async function matchLocationFromCallContext(fields) {
+    const {
+        agent_id,
+        customer_name,
+        service_address,
+        from_number,
+        location_name,
+        company_name
+    } = fields || {};
+
+    if (!agent_id) {
+        throw new Error('agent_id is required to match a location from call context');
+    }
+
+    // Validates/refreshes the stored PHPSESSID and returns a usable token.
+    const authToken = await getAuthToken(agent_id);
+
+    const candidates = await findCustomerWithConfidence(authToken, {
+        phone: from_number,
+        name: customer_name,
+        address: service_address,
+        locationName: location_name,
+        companyName: company_name
+    });
+
+    // Pick a confident match: any Tier 1, or a Tier 2 that resolves to a single
+    // unambiguous location. Anything less → don't guess, report no match.
+    let selected = candidates.find((c) => c.tier === 1 && c.locationId);
+    if (!selected) {
+        const tier2 = candidates.filter((c) => c.tier === 2 && c.locationId);
+        const uniqueLocationIds = [...new Set(tier2.map((c) => c.locationId))];
+        if (tier2.length > 0 && uniqueLocationIds.length === 1) {
+            selected = tier2[0];
+        }
+    }
+
+    if (!selected) {
+        return { status: 'no_match' };
+    }
+
+    return {
+        status: 'matched',
+        locationId: selected.locationId,
+        locationName: selected.locationName,
+        tier: selected.tier
+    };
+}
+
+/**
  * Resolve a ServiceTrade location from raw call context and create a job.
  *
  * Shared by:
@@ -39,35 +108,22 @@ async function createJobFromCallContext(fields) {
         company_name
     } = fields || {};
 
-    if (!agent_id) {
-        throw new Error('agent_id is required to create a job from call context');
-    }
-
-    // Validates/refreshes the stored PHPSESSID and returns a usable token.
-    const authToken = await getAuthToken(agent_id);
-
-    const candidates = await findCustomerWithConfidence(authToken, {
-        phone: from_number,
-        name: customer_name,
-        address: service_address,
-        locationName: location_name,
-        companyName: company_name
+    // Same auth + confident-location resolution the pre-flight gate uses, so the
+    // two can never disagree about whether this context matches a location.
+    const match = await matchLocationFromCallContext({
+        agent_id,
+        customer_name,
+        service_address,
+        from_number,
+        location_name,
+        company_name
     });
 
-    // Pick a confident match: any Tier 1, or a Tier 2 that resolves to a single
-    // unambiguous location. Anything less → don't guess, report no match.
-    let selected = candidates.find((c) => c.tier === 1 && c.locationId);
-    if (!selected) {
-        const tier2 = candidates.filter((c) => c.tier === 2 && c.locationId);
-        const uniqueLocationIds = [...new Set(tier2.map((c) => c.locationId))];
-        if (tier2.length > 0 && uniqueLocationIds.length === 1) {
-            selected = tier2[0];
-        }
-    }
-
-    if (!selected) {
+    if (match.status !== 'matched') {
         return { status: 'no_match' };
     }
+
+    const selected = { locationId: match.locationId, locationName: match.locationName, tier: match.tier };
 
     // Preserve the caller's/alarm's issue text verbatim in the job description.
     const name = (customer_name || '').trim() || 'Unknown person';
@@ -94,4 +150,4 @@ async function createJobFromCallContext(fields) {
     };
 }
 
-module.exports = { createJobFromCallContext };
+module.exports = { createJobFromCallContext, matchLocationFromCallContext };
