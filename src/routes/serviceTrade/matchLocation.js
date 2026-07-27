@@ -25,7 +25,14 @@ const supabaseService = require('../../services/supabaseService');
  *
  * Optional: customer_name, location_name, company_name
  *
- * Always responds 200 with { matched: boolean, locationId, locationName, tier }.
+ * Always responds 200 with:
+ *   { status: 'matched' | 'inactive' | 'none',
+ *     matched: boolean,                 // true only when status==='matched'
+ *     locationId, locationName,         // set for 'matched' and 'inactive'
+ *     tier,                             // set for 'matched'
+ *     inactiveLocationName,             // set for 'inactive' (the deactivated location's name)
+ *     matchedAddress }                  // set for 'inactive' (constructed street/city/state/postal)
+ * On 'inactive' the route also fires a best-effort job-fail email (non-blocking).
  */
 router.post('/st-match-location', async (req, res) => {
     try {
@@ -85,31 +92,33 @@ router.post('/st-match-location', async (req, res) => {
 
         // Inactive-location hit: the address is a KNOWN-but-deactivated location.
         // Never create a job / escalate — fire the job-fail email (gated by
-        // send_job_fail_email) so the client + internal CC are alerted. Best-effort;
-        // never let an email failure change the match verdict returned to the caller.
+        // send_job_fail_email) so the client + internal CC are alerted. Fire-and-forget:
+        // this endpoint sits on the GAS escalation gate (called synchronously before the
+        // first dispatch call), so we must NOT block the verdict on Supabase/SendGrid.
+        // The detached promise handles its own errors and never rejects the request.
         if (inactive) {
-            try {
-                const rows = await supabaseService.getServiceTradeToken(agent_id);
-                const settings = (rows && rows[0]) || {};
-                await emailNotificationService.sendJobNotification({
-                    settings,
-                    outcome: 'job_not_created',
-                    details: {
-                        agentId: agent_id,
-                        callId: call_id || '',
-                        customerName: customer_name,
-                        callerPhone: from_number,
-                        serviceAddress: service_address,
-                        priority: 'Emergency',
-                        reasonCode: 'inactive_location',
-                        reasonLabel: 'Address Inactive in ServiceTrade',
-                        reasonMessage: `The service address matches a location marked INACTIVE in ServiceTrade${outcome.locationName ? ` ("${outcome.locationName}")` : ''}. No job or dispatch — manual follow-up required.`,
-                        topCandidates: []
-                    }
-                });
-            } catch (e) {
-                console.error('st-match-location: inactive job-fail email failed:', e.message || e);
-            }
+            Promise.resolve()
+                .then(async () => {
+                    const rows = await supabaseService.getServiceTradeToken(agent_id);
+                    const settings = (rows && rows[0]) || {};
+                    await emailNotificationService.sendJobNotification({
+                        settings,
+                        outcome: 'job_not_created',
+                        details: {
+                            agentId: agent_id,
+                            callId: call_id || '',
+                            customerName: customer_name,
+                            callerPhone: from_number,
+                            serviceAddress: service_address,
+                            priority: 'Emergency',
+                            reasonCode: 'inactive_location',
+                            reasonLabel: 'Address Inactive in ServiceTrade',
+                            reasonMessage: `The service address matches a location marked INACTIVE in ServiceTrade${outcome.locationName ? ` ("${outcome.locationName}")` : ''}. No job or dispatch — manual follow-up required.`,
+                            topCandidates: []
+                        }
+                    });
+                })
+                .catch((e) => console.error('st-match-location: inactive job-fail email failed:', e.message || e));
         }
 
         const status = matched ? 'matched' : (inactive ? 'inactive' : 'none');

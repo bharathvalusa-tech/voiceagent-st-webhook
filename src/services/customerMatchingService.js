@@ -692,7 +692,6 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         locationId: candidate.locationId,
         locationName: candidate.locationName,
         locationStatus: candidate.locationStatus,
-        address: candidate.address,
         companyName: candidate.companyName,
         contactName: candidate.contactName,
         tier: candidate.tier,
