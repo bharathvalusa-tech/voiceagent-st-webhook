@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { sendSuccessResponse, sendErrorResponse } = require('../../utils/responseHelper');
 const { matchLocationFromCallContext } = require('../../services/contextJobService');
+const emailNotificationService = require('../../services/emailNotificationService');
+const supabaseService = require('../../services/supabaseService');
 
 /**
  * POST /st-match-location
@@ -53,6 +55,7 @@ router.post('/st-match-location', async (req, res) => {
         const from_number = pick('from_number', 'caller_phone', 'phone');
         const location_name = pick('location_name');
         const company_name = pick('company_name');
+        const call_id = pick('call_id', 'inbound_call_id');
 
         console.log('st-match-location received', {
             payloadKeys: Object.keys(src),
@@ -78,15 +81,54 @@ router.post('/st-match-location', async (req, res) => {
         });
 
         const matched = outcome.status === 'matched';
+        const inactive = outcome.status === 'inactive_match';
+
+        // Inactive-location hit: the address is a KNOWN-but-deactivated location.
+        // Never create a job / escalate — fire the job-fail email (gated by
+        // send_job_fail_email) so the client + internal CC are alerted. Best-effort;
+        // never let an email failure change the match verdict returned to the caller.
+        if (inactive) {
+            try {
+                const rows = await supabaseService.getServiceTradeToken(agent_id);
+                const settings = (rows && rows[0]) || {};
+                await emailNotificationService.sendJobNotification({
+                    settings,
+                    outcome: 'job_not_created',
+                    details: {
+                        agentId: agent_id,
+                        callId: call_id || '',
+                        customerName: customer_name,
+                        callerPhone: from_number,
+                        serviceAddress: service_address,
+                        priority: 'Emergency',
+                        reasonCode: 'inactive_location',
+                        reasonLabel: 'Address Inactive in ServiceTrade',
+                        reasonMessage: `The service address matches a location marked INACTIVE in ServiceTrade${outcome.locationName ? ` ("${outcome.locationName}")` : ''}. No job or dispatch — manual follow-up required.`,
+                        topCandidates: []
+                    }
+                });
+            } catch (e) {
+                console.error('st-match-location: inactive job-fail email failed:', e.message || e);
+            }
+        }
+
+        const status = matched ? 'matched' : (inactive ? 'inactive' : 'none');
         return sendSuccessResponse(
             res,
             {
+                status,
                 matched,
-                locationId: matched ? outcome.locationId : null,
-                locationName: matched ? outcome.locationName : null,
-                tier: matched ? outcome.tier : null
+                locationId: (matched || inactive) ? (outcome.locationId || null) : null,
+                locationName: (matched || inactive) ? (outcome.locationName || null) : null,
+                tier: matched ? outcome.tier : null,
+                inactiveLocationName: inactive ? (outcome.locationName || null) : null,
+                matchedAddress: inactive ? (outcome.matchedAddress || null) : null
             },
-            matched ? 'Confident location match found' : 'No confident location match',
+            matched
+                ? 'Confident location match found'
+                : (inactive
+                    ? 'Address matches an INACTIVE ServiceTrade location — job/dispatch blocked'
+                    : 'No confident location match'),
             200
         );
     } catch (error) {

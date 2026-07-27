@@ -148,6 +148,10 @@ const buildCandidate = ({ contact, location, source }) => {
         contactEmail: contact?.email || '',
         locationId: location?.id || null,
         locationName: location?.name || '',
+        // Location status ('active' | 'inactive' | 'pending' | null). The matcher pool now
+        // includes inactive locations; the confident-match selection uses this to prefer
+        // active and to flag a known-but-inactive address. Missing → treated as active.
+        locationStatus: location?.status || null,
         companyId: location?.company?.id || null,
         companyName: location?.company?.name || '',
         address: location?.address || null
@@ -687,6 +691,8 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
     const topCandidates = narrowedTieredCandidates.slice(0, 5).map((candidate) => ({
         locationId: candidate.locationId,
         locationName: candidate.locationName,
+        locationStatus: candidate.locationStatus,
+        address: candidate.address,
         companyName: candidate.companyName,
         contactName: candidate.contactName,
         tier: candidate.tier,
