@@ -72,7 +72,7 @@ class ServiceTradeService {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
             const response = await fetch(
-                `${this.baseUrl}/location?name=${encodeURIComponent(nameQuery)}&limit=100&status=active`,
+                `${this.baseUrl}/location?name=${encodeURIComponent(nameQuery)}&limit=100&status=active,inactive&isCustomer=true`,
                 {
                     method: "GET",
                     headers: {
@@ -98,7 +98,7 @@ class ServiceTradeService {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
             const response = await fetch(
-                `${this.baseUrl}/location?search=${encodeURIComponent(searchQuery)}`,
+                `${this.baseUrl}/location?search=${encodeURIComponent(searchQuery)}&status=active,inactive&isCustomer=true`,
                 {
                     method: "GET",
                     headers: {
@@ -153,7 +153,7 @@ class ServiceTradeService {
             // Use companyId query param (comma-delimited list) for server-side filtering
             const companyIdsParam = companyIds.join(',');
             const response = await fetch(
-                `${this.baseUrl}/location?companyId=${companyIdsParam}&status=active&limit=1000`,
+                `${this.baseUrl}/location?companyId=${companyIdsParam}&status=active,inactive&isCustomer=true&limit=1000`,
                 {
                     method: "GET",
                     headers: {
@@ -178,9 +178,11 @@ class ServiceTradeService {
     async searchLocationsByAddress(authToken, addressQuery) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
-            // Address matching must scan all active locations, not only page 1.
+            // Address matching scans ALL customer locations (active + inactive), not only
+            // page 1. Inactive candidates are kept in the pool so the matcher can detect a
+            // known-but-deactivated address; the confident-match selection prefers active.
             const firstResponse = await fetch(
-                `${this.baseUrl}/location?page=1&status=active&limit=1000`,
+                `${this.baseUrl}/location?page=1&status=active,inactive&isCustomer=true&limit=1000`,
                 {
                     method: "GET",
                     headers: {
@@ -200,7 +202,7 @@ class ServiceTradeService {
 
             for (let page = 1; page <= totalPages; page += 1) {
                 pagePromises.push(
-                    fetch(`${this.baseUrl}/location?page=${page}&status=active&limit=1000`, {
+                    fetch(`${this.baseUrl}/location?page=${page}&status=active,inactive&isCustomer=true&limit=1000`, {
                         method: "GET",
                         headers: {
                             "Cookie": cookieValue,

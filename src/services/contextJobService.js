@@ -19,6 +19,7 @@ const { findCustomerWithConfidence } = require('./customerMatchingService');
  * @param {string} [fields.location_name]
  * @param {string} [fields.company_name]
  * @returns {Promise<{status:'matched', locationId:*, locationName:*, tier:*}
+ *                   | {status:'inactive_match', locationId:*, locationName:*, matchedAddress:string}
  *                   | {status:'no_match'}>}
  * Throws only on unexpected errors (auth/network); the caller decides how to surface those.
  */
@@ -47,27 +48,50 @@ async function matchLocationFromCallContext(fields) {
         companyName: company_name
     });
 
-    // Pick a confident match: any Tier 1, or a Tier 2 that resolves to a single
-    // unambiguous location. Anything less → don't guess, report no match.
-    let selected = candidates.find((c) => c.tier === 1 && c.locationId);
-    if (!selected) {
-        const tier2 = candidates.filter((c) => c.tier === 2 && c.locationId);
-        const uniqueLocationIds = [...new Set(tier2.map((c) => c.locationId))];
-        if (tier2.length > 0 && uniqueLocationIds.length === 1) {
-            selected = tier2[0];
+    // Confident-match picker: any Tier 1, or a Tier 2 that resolves to a single
+    // unambiguous location. Anything less → no confident match.
+    const pickConfident = (cands) => {
+        let sel = cands.find((c) => c.tier === 1 && c.locationId);
+        if (!sel) {
+            const tier2 = cands.filter((c) => c.tier === 2 && c.locationId);
+            const uniqueLocationIds = [...new Set(tier2.map((c) => c.locationId))];
+            if (tier2.length > 0 && uniqueLocationIds.length === 1) {
+                sel = tier2[0];
+            }
         }
-    }
-
-    if (!selected) {
-        return { status: 'no_match' };
-    }
-
-    return {
-        status: 'matched',
-        locationId: selected.locationId,
-        locationName: selected.locationName,
-        tier: selected.tier
+        return sel || null;
     };
+
+    // ACTIVE-preferred: a confident match among active (or status-unknown) locations
+    // wins and drives job creation. A job must NEVER be created on an inactive location,
+    // so inactive candidates are excluded here.
+    const activeSelected = pickConfident(candidates.filter((c) => c.locationStatus !== 'inactive'));
+    if (activeSelected) {
+        return {
+            status: 'matched',
+            locationId: activeSelected.locationId,
+            locationName: activeSelected.locationName,
+            tier: activeSelected.tier
+        };
+    }
+
+    // No active match. Is the address a known-but-INACTIVE (deactivated) location?
+    // If so, surface it distinctly so the caller can block dispatch + raise a job-fail
+    // alert. (Same tier logic, restricted to inactive candidates.)
+    const inactiveSelected = pickConfident(candidates.filter((c) => c.locationStatus === 'inactive'));
+    if (inactiveSelected) {
+        const a = inactiveSelected.address || {};
+        const matchedAddress = [a.street, a.city, a.state, a.postalCode]
+            .filter(Boolean).join(', ').trim();
+        return {
+            status: 'inactive_match',
+            locationId: inactiveSelected.locationId,
+            locationName: inactiveSelected.locationName,
+            matchedAddress
+        };
+    }
+
+    return { status: 'no_match' };
 }
 
 /**

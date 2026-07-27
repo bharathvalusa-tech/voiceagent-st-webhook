@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { sendSuccessResponse, sendErrorResponse } = require('../../utils/responseHelper');
 const { matchLocationFromCallContext } = require('../../services/contextJobService');
+const emailNotificationService = require('../../services/emailNotificationService');
+const supabaseService = require('../../services/supabaseService');
 
 /**
  * POST /st-match-location
@@ -23,7 +25,14 @@ const { matchLocationFromCallContext } = require('../../services/contextJobServi
  *
  * Optional: customer_name, location_name, company_name
  *
- * Always responds 200 with { matched: boolean, locationId, locationName, tier }.
+ * Always responds 200 with:
+ *   { status: 'matched' | 'inactive' | 'none',
+ *     matched: boolean,                 // true only when status==='matched'
+ *     locationId, locationName,         // set for 'matched' and 'inactive'
+ *     tier,                             // set for 'matched'
+ *     inactiveLocationName,             // set for 'inactive' (the deactivated location's name)
+ *     matchedAddress }                  // set for 'inactive' (constructed street/city/state/postal)
+ * On 'inactive' the route also fires a best-effort job-fail email (non-blocking).
  */
 router.post('/st-match-location', async (req, res) => {
     try {
@@ -53,6 +62,7 @@ router.post('/st-match-location', async (req, res) => {
         const from_number = pick('from_number', 'caller_phone', 'phone');
         const location_name = pick('location_name');
         const company_name = pick('company_name');
+        const call_id = pick('call_id', 'inbound_call_id');
 
         console.log('st-match-location received', {
             payloadKeys: Object.keys(src),
@@ -78,15 +88,56 @@ router.post('/st-match-location', async (req, res) => {
         });
 
         const matched = outcome.status === 'matched';
+        const inactive = outcome.status === 'inactive_match';
+
+        // Inactive-location hit: the address is a KNOWN-but-deactivated location.
+        // Never create a job / escalate — fire the job-fail email (gated by
+        // send_job_fail_email) so the client + internal CC are alerted. Fire-and-forget:
+        // this endpoint sits on the GAS escalation gate (called synchronously before the
+        // first dispatch call), so we must NOT block the verdict on Supabase/SendGrid.
+        // The detached promise handles its own errors and never rejects the request.
+        if (inactive) {
+            Promise.resolve()
+                .then(async () => {
+                    const rows = await supabaseService.getServiceTradeToken(agent_id);
+                    const settings = (rows && rows[0]) || {};
+                    await emailNotificationService.sendJobNotification({
+                        settings,
+                        outcome: 'job_not_created',
+                        details: {
+                            agentId: agent_id,
+                            callId: call_id || '',
+                            customerName: customer_name,
+                            callerPhone: from_number,
+                            serviceAddress: service_address,
+                            priority: 'Emergency',
+                            reasonCode: 'inactive_location',
+                            reasonLabel: 'Address Inactive in ServiceTrade',
+                            reasonMessage: `The service address matches a location marked INACTIVE in ServiceTrade${outcome.locationName ? ` ("${outcome.locationName}")` : ''}. No job or dispatch — manual follow-up required.`,
+                            topCandidates: []
+                        }
+                    });
+                })
+                .catch((e) => console.error('st-match-location: inactive job-fail email failed:', e.message || e));
+        }
+
+        const status = matched ? 'matched' : (inactive ? 'inactive' : 'none');
         return sendSuccessResponse(
             res,
             {
+                status,
                 matched,
-                locationId: matched ? outcome.locationId : null,
-                locationName: matched ? outcome.locationName : null,
-                tier: matched ? outcome.tier : null
+                locationId: (matched || inactive) ? (outcome.locationId || null) : null,
+                locationName: (matched || inactive) ? (outcome.locationName || null) : null,
+                tier: matched ? outcome.tier : null,
+                inactiveLocationName: inactive ? (outcome.locationName || null) : null,
+                matchedAddress: inactive ? (outcome.matchedAddress || null) : null
             },
-            matched ? 'Confident location match found' : 'No confident location match',
+            matched
+                ? 'Confident location match found'
+                : (inactive
+                    ? 'Address matches an INACTIVE ServiceTrade location — job/dispatch blocked'
+                    : 'No confident location match'),
             200
         );
     } catch (error) {
