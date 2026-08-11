@@ -33,12 +33,24 @@ const OUTCOMES = {
     created: 'job created — tech approved',
     declined: 'no job — tech declined',
     no_match: 'no job created — no valid ServiceTrade location (tech approved)',
-    error: 'no job — error creating job'
+    error: 'no job — error creating job',
+    // A voicemail box answered instead of a person. NOT terminal — the escalation
+    // chain must keep dialing the next contact — but it IS a job failure for the
+    // row's metrics, so it gets its own trail line. Deliberately worded so it does
+    // NOT match handleJobUpdate's "tech approved" / "error creating job" patterns,
+    // which would wrongly mark the row terminal.
+    voicemail: 'no job — reached voicemail; no technician contact'
 };
 
 // Isolated idempotency cache (mirrors src/routes/webhook/retell.js). Prevents a
 // retried `call_analyzed` from creating a second job. In-memory, so it resets
 // per serverless instance — same trade-off as the inbound handler.
+//
+// NOTE: this is best-effort only, and it is NOT what keeps the sheet trail free of
+// duplicates. It is checked once per HTTP request, so it cannot stop notifySheet's
+// own retry loop below, and being per-instance it cannot stop a Retell re-delivery
+// that lands on a fresh serverless instance. The authoritative de-duplication is
+// the idempotency guard in the Apps Script `handleJobUpdate`.
 const processedCalls = new Map();
 const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
 setInterval(() => {
@@ -67,7 +79,13 @@ function normalizeBool(value) {
 }
 
 const SHEET_NOTIFY_MAX_ATTEMPTS = 3;
-const SHEET_NOTIFY_TIMEOUT_MS = 4000;
+// Must stay ABOVE the Apps Script worst case, not below it. handleJobUpdate takes a
+// script lock, writes, flushes twice, and can build + send the consolidated SendGrid
+// email before it responds — comfortably past 4s. A timeout shorter than that reads a
+// SUCCESS as a failure: the abort only closes our socket, while GAS keeps running and
+// commits the write. The retry then re-POSTs an already-applied update and the outcome
+// trail gains a duplicate line.
+const SHEET_NOTIFY_TIMEOUT_MS = 20000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -240,10 +258,41 @@ router.post('/retell-outbound', async (req, res) => {
         }
         if (callId) processedCalls.set(callId, Date.now());
 
-        // Gate: create the job ONLY when the technician approved it on the call.
         const analysis = call.call_analysis || {};
         const custom = analysis.custom_analysis_data || {};
         const collected = call.collected_dynamic_variables || {};
+
+        // Gate 1: a voicemail box is not a technician. The outbound agent classifies
+        // this on the call itself (`reached_voicemail`), because the post-call analyzer
+        // otherwise reads Clara's own voicemail message as engagement and flags the job
+        // approved. Retell's native in_voicemail / disconnection_reason is the backstop
+        // for when the agent misses it.
+        //
+        // NOT terminal: no client email and no escalation stop here. The chain keeps
+        // dialing the next contact — GAS decides terminal state — but the row records
+        // the voicemail as a job failure.
+        const reachedVoicemail = normalizeBool(
+            custom.reached_voicemail ??
+            custom.reachedVoicemail ??
+            collected.reached_voicemail
+        );
+        const voicemailDetected =
+            reachedVoicemail === true ||
+            analysis.in_voicemail === true ||
+            String(call.disconnection_reason || '').toLowerCase() === 'voicemail_reached';
+
+        if (voicemailDetected) {
+            console.log(`[retell-outbound] voicemail detected (reached_voicemail: ${JSON.stringify(custom.reached_voicemail)}, in_voicemail: ${analysis.in_voicemail}, disconnection_reason: ${call.disconnection_reason}) — no job for call ${callId}, agent ${agentId}`);
+            await notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.voicemail });
+            return sendSuccessResponse(
+                res,
+                { status: 'skipped', reason: 'voicemail', call_id: callId },
+                'Reached voicemail — no technician contact, no ServiceTrade job',
+                200
+            );
+        }
+
+        // Gate 2: create the job ONLY when the technician approved it on the call.
         const jobApproved = normalizeBool(
             custom.servicetrade_job_created ??
             custom.serviceTradeJobCreated ??

@@ -43,7 +43,7 @@
  │   • WS-4 guard: ignore outbound/self call_ids │
  │   • WS-3 upsert: findRowByCallId → update/append
  │   • emergency? → first call + tech email      │
- │  processAllEscalations()  (time trigger, 5m)  │
+ │  processAllEscalations()  (time trigger, 1m)  │
  │   • advances the escalation chain             │
  │   • places outbound "dispatch" calls (Retell) │
  └──────────────────────────────────────────────┘
@@ -149,6 +149,13 @@ offers**:
 | "Patch you through to the caller now?" | `transfer_call` tool (warm transfer to `{{from_number}}`) | The actual customer connection. |
 | "Call you back?" (if no patch) | `make_call` enum | **Currently unused** — see note below. |
 
+`servicetrade_job_created` is set **only** from the technician's spoken agreement — no tool
+is invoked on the call. A second post-call var, `reached_voicemail`, is set by the agent when
+a voicemail box or answering machine picked up (explicit word or answering-machine signs).
+`retellOutbound.js` checks it **before** the approval gate, so a voicemail can never produce a
+job no matter what the analyzer inferred; Retell's own `in_voicemail` / `voicemail_reached`
+serve as the backstop. A warm transfer on its own is likewise not approval.
+
 > **Stop condition (WS-1):** escalation stops on **any answered call**, decided
 > from Retell `get-call` `call_status` + `disconnection_reason` (instant, no
 > post-call-analysis lag). A tech who answers and *declines* the job or a callback
@@ -157,8 +164,11 @@ offers**:
 ## 4. Escalation state machine (`adaptiveclimate.gs`)
 
 - **Trigger:** first call fires immediately in `doPost`; subsequent steps run from
-  the `processAllEscalations` time trigger every **5 minutes**, over rows where
-  `make_call == true && is_emergency == true && escalation_complete == false`.
+  the `processAllEscalations` time trigger every **1 minute** (`.everyMinutes(1)`),
+  over rows where `make_call == true && is_emergency == true && escalation_complete == false`.
+  The tick is deliberately faster than `DELAY_MINUTES` so answer detection and the
+  outcome/terminal sheet writes land within ~1 min; the dial spacing is enforced
+  separately by `canMakeCall`.
 - **Steps (`getCallTarget`):** 1 = on-call tech (or skip to 3 if none) → 2 = John
   McLean → 3 = Alex Kovachev → 4 = John McLean. Hard cap `MAX_ESCALATION_ATTEMPTS = 4`.
 - **Per tick (`processEscalationRowWithEmail`):**
@@ -180,13 +190,28 @@ offers**:
      is appended, and the manual-review client email is sent. **Fail-open:** any endpoint
      error / non-200 → the call is placed anyway (a transient outage never suppresses a
      real emergency). Uses the same matcher as post-call creation, so the gate's verdict
-     and the eventual create verdict can't drift.
+     and the eventual create verdict can't drift. The **passing** path also appends a line
+     (`location matched (…) — dispatching`, or `⚠️ location gate failed open (…)`), so a
+     genuine match can be told apart from a fail-open when reading the sheet afterwards.
   5. **First / next call** — `checkAnsweredAndComplete(callId, stepN)` on the prior
      call returns `stop` | `pending` | `continue`; on `continue` (no answer) the
-     next contact is dialed and the counter advances.
+     next contact is dialed and the counter advances. It re-fetches the call on every
+     tick — it must never short-circuit on the presence of an outcome line, because the
+     `job_update` webhook writes lines with the same `callN - ` prefix and would
+     otherwise suppress answer detection entirely.
+- **Voicemail is not an answer.** `classifyCall` returns `no_answer` for
+  `voicemail_reached`, for `call_analysis.in_voicemail`, and for the outbound agent's own
+  `reached_voicemail` verdict — so the chain keeps escalating to the next contact. The
+  outbound webhook records `no job — reached voicemail; no technician contact` on the row
+  without marking it terminal.
+- **No service address → terminal before any dial.** If the inbound row lands with a blank
+  `service_address`, `doPost` marks it complete, appends
+  `no job — call ended before a service address was captured; manual follow-up needed`, and
+  sends the manual-review client email. No escalation call is placed.
 - **Stop conditions:** no ServiceTrade location match (pre-flight gate, first call) ·
-  answered call (WS-1) · job created (`handleJobUpdate`) · automated-caller cooldown
-  (WS-2) · max attempts exhausted.
+  no service address captured · answered call (WS-1, including a tech who answers and
+  declines) · job created (`handleJobUpdate`) · automated-caller cooldown (WS-2) ·
+  max attempts exhausted.
 
 ## 5. Outbound write-back — `handleJobUpdate`
 
