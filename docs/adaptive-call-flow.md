@@ -43,7 +43,7 @@
  │   • WS-4 guard: ignore outbound/self call_ids │
  │   • WS-3 upsert: findRowByCallId → update/append
  │   • emergency? → first call + tech email      │
- │  processAllEscalations()  (time trigger, 5m)  │
+ │  processAllEscalations()  (time trigger, 1m)  │
  │   • advances the escalation chain             │
  │   • places outbound "dispatch" calls (Retell) │
  └──────────────────────────────────────────────┘
@@ -149,6 +149,37 @@ offers**:
 | "Patch you through to the caller now?" | `transfer_call` tool (warm transfer to `{{from_number}}`) | The actual customer connection. |
 | "Call you back?" (if no patch) | `make_call` enum | **Currently unused** — see note below. |
 
+`servicetrade_job_created` is set **only** from the technician's spoken agreement — no tool
+is invoked on the call. A second post-call var, `reached_voicemail`, is set by the agent when
+a voicemail box or answering machine picked up. A warm transfer on its own is not approval.
+
+### 3.1 The three gates in `retellOutbound.js`
+
+All three "no job" cases arrive with `servicetrade_job_created = false`, so the handler
+separates them before deciding anything, and tells the sheet which one it was:
+
+| # | Gate | Detected from | Job? | Ends escalation? |
+|---|------|---------------|------|------------------|
+| 1 | Nobody answered | `disconnection_reason` in the no-answer set (`dial_no_answer`, `dial_busy`, `registered_call_timeout`, …) or `call_status` `not_connected`/`error` | no | **no** — keep dialing |
+| 2 | Voicemail | `reached_voicemail`, else `call_analysis.in_voicemail` / `voicemail_reached` | no | **no** — keep dialing |
+| 3a | Human answered, approved | `servicetrade_job_created = true` | **yes** | yes → success email |
+| 3b | Human answered, declined | `servicetrade_job_created = false` | no | yes → job-failure email |
+
+The order matters. Gates 1 and 2 can both look true on the same call — the analyzer flags
+`reached_voicemail` while telephony reports the dial as unanswered — so no-answer is checked
+first and wins the label: what the carrier reports about the connection outranks what the
+analyzer inferred from a transcript that may not exist. `voicemail_reached` is deliberately
+kept out of the no-answer set so it still falls to gate 2.
+
+Gate 1 is also what makes a decline safe to treat as terminal. An unanswered call produces
+`servicetrade_job_created = false` too (no human, question never asked), so without it the
+chain would end after the first no-answer and the ladder would never reach John / Alex /
+Brian. `disconnection_reason` is used rather than a post-call variable because these calls
+have no transcript to infer from.
+
+The verdict travels to GAS as a `terminal` boolean on the `job_update` payload — GAS cannot
+derive it, since all three cases used to read as `no job — tech declined`.
+
 > **Stop condition (WS-1):** escalation stops on **any answered call**, decided
 > from Retell `get-call` `call_status` + `disconnection_reason` (instant, no
 > post-call-analysis lag). A tech who answers and *declines* the job or a callback
@@ -157,8 +188,11 @@ offers**:
 ## 4. Escalation state machine (`adaptiveclimate.gs`)
 
 - **Trigger:** first call fires immediately in `doPost`; subsequent steps run from
-  the `processAllEscalations` time trigger every **5 minutes**, over rows where
-  `make_call == true && is_emergency == true && escalation_complete == false`.
+  the `processAllEscalations` time trigger every **1 minute** (`.everyMinutes(1)`),
+  over rows where `make_call == true && is_emergency == true && escalation_complete == false`.
+  The tick is deliberately faster than `DELAY_MINUTES` so answer detection and the
+  outcome/terminal sheet writes land within ~1 min; the dial spacing is enforced
+  separately by `canMakeCall`.
 - **Steps (`getCallTarget`):** 1 = on-call tech (or skip to 3 if none) → 2 = John
   McLean → 3 = Alex Kovachev → 4 = John McLean. Hard cap `MAX_ESCALATION_ATTEMPTS = 4`.
 - **Per tick (`processEscalationRowWithEmail`):**
@@ -180,27 +214,51 @@ offers**:
      is appended, and the manual-review client email is sent. **Fail-open:** any endpoint
      error / non-200 → the call is placed anyway (a transient outage never suppresses a
      real emergency). Uses the same matcher as post-call creation, so the gate's verdict
-     and the eventual create verdict can't drift.
+     and the eventual create verdict can't drift. The **passing** path also appends a line
+     (`location matched (…) — dispatching`, or `⚠️ location gate failed open (…)`), so a
+     genuine match can be told apart from a fail-open when reading the sheet afterwards.
   5. **First / next call** — `checkAnsweredAndComplete(callId, stepN)` on the prior
      call returns `stop` | `pending` | `continue`; on `continue` (no answer) the
-     next contact is dialed and the counter advances.
+     next contact is dialed and the counter advances. It re-fetches the call on every
+     tick — it must never short-circuit on the presence of an outcome line, because the
+     `job_update` webhook writes lines with the same `callN - ` prefix and would
+     otherwise suppress answer detection entirely.
+- **Voicemail is not an answer.** `classifyCall` returns `no_answer` for
+  `voicemail_reached`, for `call_analysis.in_voicemail`, and for the outbound agent's own
+  `reached_voicemail` verdict — so the chain keeps escalating to the next contact. The
+  outbound webhook records `no job — reached voicemail; no technician contact` on the row
+  without marking it terminal.
+- **No service address → terminal before any dial.** If the inbound row lands with a blank
+  `service_address`, `doPost` marks it complete, appends
+  `no job — call ended before a service address was captured; manual follow-up needed`, and
+  sends the manual-review client email. No escalation call is placed.
 - **Stop conditions:** no ServiceTrade location match (pre-flight gate, first call) ·
-  answered call (WS-1) · job created (`handleJobUpdate`) · automated-caller cooldown
-  (WS-2) · max attempts exhausted.
+  no service address captured · answered call (WS-1) · job created, declined, or
+  approved-but-failed — any `terminal` `job_update` (`handleJobUpdate`) ·
+  automated-caller cooldown (WS-2) · max attempts exhausted.
+- **Not stop conditions:** voicemail and no-answer. Both write an outcome line and the chain
+  continues to the next contact.
 
 ## 5. Outbound write-back — `handleJobUpdate`
 
 `retellOutbound.js` `notifySheet()` POSTs `{ action:'job_update', inbound_call_id,
-outbound_call_id, is_job_created, job_number, outcome }`. GAS:
+outbound_call_id, is_job_created, job_number, outcome, terminal }`. GAS:
 
 - Finds the row by `inbound_call_id` (`findRowByCallId`).
 - **Downgrade guard:** once `is_job_created == TRUE`, a later "declined" update is ignored.
-- **WS-5:** appends a step-labeled line to `outcome` (`call1/2/3 - <outcome>`),
-  matching `outbound_call_id` against `RESPONSE_CALL_ID_1/2/3`.
-- **WS-6:** if `is_job_created == true`, marks the row terminal (`make_call=false`,
-  `escalation_complete=true`) and sends the consolidated client email. A declined /
-  no-match / error update is **not** treated as terminal here (a no-answer outbound
-  call also lands in that branch); WS-1's answer-detection decides stop-vs-continue.
+- **Duplicate guard:** once `is_job_created == TRUE`, a repeat "created" update returns
+  `ignored_duplicate` before writing anything — `notifySheet` retries at-least-once and
+  Retell re-delivers `call_analyzed` on any non-2xx, so the same payload does arrive twice.
+- **WS-5:** appends a step-labeled line to `outcome` (`callN - <outcome>`), matching
+  `outbound_call_id` against `RESPONSE_CALL_ID_1/2/3`. `RESPONSE_CALL_ID_3` is a shared slot
+  for every call from the 3rd onward, so a match there takes its step number from
+  `call_decline_counter` rather than assuming 3.
+- **WS-6:** stops the chain (`make_call=false`, `escalation_complete=true`) and sends the
+  consolidated client email when `is_job_created == true` (success email) or when the payload
+  says `terminal` (manual-review email — a human answered and declined, or approved but the
+  job failed). Voicemail and no-answer updates carry `terminal: false`, write only their
+  outcome line, and leave escalation running. If `terminal` is absent (an older webhook
+  deploy), GAS falls back to the legacy wording check so a rollout in either order is safe.
 
 ## 6. Simultaneous webhooks
 

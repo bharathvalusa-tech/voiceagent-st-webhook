@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 .env
 .vercel
 .env*
+
+#google- sheet work
+google-sheet/

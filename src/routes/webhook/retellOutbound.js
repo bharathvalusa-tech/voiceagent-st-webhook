@@ -33,12 +33,36 @@ const OUTCOMES = {
     created: 'job created — tech approved',
     declined: 'no job — tech declined',
     no_match: 'no job created — no valid ServiceTrade location (tech approved)',
-    error: 'no job — error creating job'
+    error: 'no job — error creating job',
+    // A voicemail box answered instead of a person. NOT terminal — the escalation
+    // chain must keep dialing the next contact — but it IS a job failure for the
+    // row's metrics, so it gets its own trail line.
+    voicemail: 'no job — reached voicemail; no technician contact',
+    // Nobody picked up at all. Also NOT terminal, and distinct from `declined`:
+    // `declined` now means a HUMAN answered and said no, which ends the chain.
+    no_answer: 'no job — no answer; nobody reached'
 };
+
+// Disconnection reasons that mean the call was never answered by a person. Mirrors
+// the NO_ANSWER set in the Apps Script `classifyCall`, so the webhook and the sheet
+// agree on what "nobody was reached" means.
+const NO_ANSWER_REASONS = new Set([
+    'dial_no_answer', 'dial_busy', 'dial_failed', 'invalid_destination',
+    'registered_call_timeout', 'marked_as_spam', 'sip_routing_error',
+    'telephony_provider_permission_denied', 'telephony_provider_unavailable',
+    'user_declined', 'concurrency_limit_reached', 'no_concurrency_fallback',
+    'no_valid_payment', 'scam_detected'
+]);
 
 // Isolated idempotency cache (mirrors src/routes/webhook/retell.js). Prevents a
 // retried `call_analyzed` from creating a second job. In-memory, so it resets
 // per serverless instance — same trade-off as the inbound handler.
+//
+// NOTE: this is best-effort only, and it is NOT what keeps the sheet trail free of
+// duplicates. It is checked once per HTTP request, so it cannot stop notifySheet's
+// own retry loop below, and being per-instance it cannot stop a Retell re-delivery
+// that lands on a fresh serverless instance. The authoritative de-duplication is
+// the idempotency guard in the Apps Script `handleJobUpdate`.
 const processedCalls = new Map();
 const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
 setInterval(() => {
@@ -67,7 +91,13 @@ function normalizeBool(value) {
 }
 
 const SHEET_NOTIFY_MAX_ATTEMPTS = 3;
-const SHEET_NOTIFY_TIMEOUT_MS = 4000;
+// Must stay ABOVE the Apps Script worst case, not below it. handleJobUpdate takes a
+// script lock, writes, flushes twice, and can build + send the consolidated SendGrid
+// email before it responds — comfortably past 4s. A timeout shorter than that reads a
+// SUCCESS as a failure: the abort only closes our socket, while GAS keeps running and
+// commits the write. The retry then re-POSTs an already-applied update and the outcome
+// trail gains a duplicate line.
+const SHEET_NOTIFY_TIMEOUT_MS = 20000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -78,7 +108,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * the webhook. Skips quietly if the exec URL is unset or we have no
  * inbound_call_id to key the row.
  */
-async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNumber, outcome }) {
+async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNumber, outcome, terminal = false }) {
     const url = config.adaptiveSheetExecUrl;
     if (!url) {
         console.log('[retell-outbound] ADAPTIVE_SHEET_EXEC_URL not set — skipping sheet update');
@@ -97,7 +127,13 @@ async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNum
         outbound_call_id: outboundCallId || '',
         is_job_created: Boolean(isJobCreated),
         job_number: jobNumber || '',
-        outcome: outcome || ''
+        outcome: outcome || '',
+        // Whether this result ENDS the escalation chain. Decided here because only
+        // this handler can tell "a human answered and declined" (terminal) from
+        // "voicemail" or "nobody picked up" (keep escalating) — all three arrive with
+        // servicetrade_job_created = false. Previously GAS had to infer terminality by
+        // pattern-matching the outcome wording, which could not make that distinction.
+        terminal: Boolean(terminal)
     });
 
     for (let attempt = 1; attempt <= SHEET_NOTIFY_MAX_ATTEMPTS; attempt++) {
@@ -240,10 +276,79 @@ router.post('/retell-outbound', async (req, res) => {
         }
         if (callId) processedCalls.set(callId, Date.now());
 
-        // Gate: create the job ONLY when the technician approved it on the call.
         const analysis = call.call_analysis || {};
         const custom = analysis.custom_analysis_data || {};
         const collected = call.collected_dynamic_variables || {};
+
+        // The gates run in this order, and the order is deliberate:
+        //   1. nobody answered   2. voicemail   3a. human approved   3b. human declined
+        //
+        // 1 and 2 both mean "no technician was reached", so neither creates a job and
+        // neither is terminal — the chain keeps dialing. They can BOTH look true on the
+        // same call (the analyzer flags reached_voicemail while telephony reports the
+        // dial as unanswered), so no-answer is checked first and wins the label: what
+        // the carrier reports about the connection outranks what the analyzer inferred
+        // from a transcript that may not exist.
+
+        // Gate 1: nobody picked up. Retell still fires call_analyzed for a call that
+        // rang out, and it arrives with servicetrade_job_created = false because there
+        // was no human and the job question was never asked. Without this gate that is
+        // indistinguishable from a technician declining, and the chain would end after
+        // the first unanswered call instead of escalating to the next contact.
+        //
+        // disconnection_reason is used rather than a post-call variable because there is
+        // no transcript to infer from on these calls. `voicemail_reached` is deliberately
+        // NOT in NO_ANSWER_REASONS — it belongs to gate 2.
+        const disconnectionReason = String(call.disconnection_reason || '').toLowerCase();
+        const nobodyAnswered =
+            NO_ANSWER_REASONS.has(disconnectionReason) ||
+            disconnectionReason.startsWith('error_') ||
+            ['not_connected', 'error'].includes(String(call.call_status || '').toLowerCase());
+
+        if (nobodyAnswered) {
+            console.log(`[retell-outbound] no answer (call_status: ${call.call_status}, disconnection_reason: ${call.disconnection_reason}) — no job for call ${callId}, agent ${agentId}; escalation continues`);
+            await notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_answer, terminal: false });
+            return sendSuccessResponse(
+                res,
+                { status: 'skipped', reason: 'no_answer', call_id: callId },
+                'Nobody answered — no ServiceTrade job, escalation continues',
+                200
+            );
+        }
+
+        // Gate 2: a voicemail box is not a technician. The outbound agent classifies this
+        // on the call itself (`reached_voicemail`), because the post-call analyzer
+        // otherwise reads Clara's own voicemail message as engagement and flags the job
+        // approved. Retell's native in_voicemail / voicemail_reached is the backstop for
+        // when the agent misses it.
+        //
+        // NOT terminal: no client email and no escalation stop here. The chain keeps
+        // dialing the next contact — GAS decides terminal state — but the row records
+        // the voicemail as a job failure.
+        const reachedVoicemail = normalizeBool(
+            custom.reached_voicemail ??
+            custom.reachedVoicemail ??
+            collected.reached_voicemail
+        );
+        const voicemailDetected =
+            reachedVoicemail === true ||
+            analysis.in_voicemail === true ||
+            disconnectionReason === 'voicemail_reached';
+
+        if (voicemailDetected) {
+            console.log(`[retell-outbound] voicemail detected (reached_voicemail: ${JSON.stringify(custom.reached_voicemail)}, in_voicemail: ${analysis.in_voicemail}, disconnection_reason: ${call.disconnection_reason}) — no job for call ${callId}, agent ${agentId}; escalation continues`);
+            await notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.voicemail, terminal: false });
+            return sendSuccessResponse(
+                res,
+                { status: 'skipped', reason: 'voicemail', call_id: callId },
+                'Reached voicemail — no technician contact, no ServiceTrade job',
+                200
+            );
+        }
+
+        // Gate 3: a human answered. Create the job ONLY when they approved it. Either
+        // way this call ENDS the escalation chain — someone was reached and gave an
+        // answer, so dialing further contacts about the same emergency is pointless.
         const jobApproved = normalizeBool(
             custom.servicetrade_job_created ??
             custom.serviceTradeJobCreated ??
@@ -251,15 +356,15 @@ router.post('/retell-outbound', async (req, res) => {
         );
 
         if (jobApproved !== true) {
-            console.log(`[retell-outbound] servicetrade_job_created !== true (raw: ${JSON.stringify(custom.servicetrade_job_created)}) — no job for call ${callId}, agent ${agentId}`);
+            console.log(`[retell-outbound] technician answered but did not approve a job (raw: ${JSON.stringify(custom.servicetrade_job_created)}) — call ${callId}, agent ${agentId}; escalation ends`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.declined }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.declined, terminal: true }),
                 sendJobEmail('job_not_created', { reasonCode: 'tech_declined', reasonLabel: 'Technician Declined', reasonMessage: OUTCOMES.declined })
             ]);
             return sendSuccessResponse(
                 res,
                 { status: 'skipped', reason: 'not_approved', call_id: callId },
-                'Technician did not approve a ServiceTrade job',
+                'Technician did not approve a ServiceTrade job — escalation complete',
                 200
             );
         }
@@ -267,7 +372,7 @@ router.post('/retell-outbound', async (req, res) => {
         if (!configAgentId) {
             console.error(`[retell-outbound] approved but no outbound agent id on the call payload for call ${callId}`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true }),
                 alertInternal('No ServiceTrade config agent id available (call.agent_id missing from the outbound webhook payload)')
             ]);
             return sendSuccessResponse(
@@ -291,7 +396,7 @@ router.post('/retell-outbound', async (req, res) => {
         } catch (createErr) {
             console.error(`[retell-outbound] job creation threw for call ${callId}: ${createErr.message || createErr}`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true }),
                 sendJobEmail('job_not_created', { reasonCode: 'internal_error', reasonLabel: 'Job Creation Error', reasonMessage: OUTCOMES.error }),
                 alertInternal(createErr.message || String(createErr))
             ]);
@@ -301,7 +406,7 @@ router.post('/retell-outbound', async (req, res) => {
         if (jobResult.status === 'no_match') {
             console.error(`[retell-outbound] tech approved but no confident location match for call ${callId} (agent ${configAgentId})`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match, terminal: true }),
                 sendJobEmail('job_not_created', { reasonCode: 'no_matches', reasonLabel: 'No Location Match', reasonMessage: OUTCOMES.no_match })
             ]);
             return sendSuccessResponse(
@@ -316,7 +421,7 @@ router.post('/retell-outbound', async (req, res) => {
         const jobNumber = job.jobNumber || '';
         console.log(`[retell-outbound] job created for call ${callId}: location ${jobResult.matchedLocationName} (tier ${jobResult.matchTier}), job_number ${jobNumber}`);
         await Promise.allSettled([
-            notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: true, jobNumber, outcome: OUTCOMES.created }),
+            notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: true, jobNumber, outcome: OUTCOMES.created, terminal: true }),
             sendJobEmail('job_created', { jobId: job.jobId, jobUri: job.jobUri, jobNumber })
         ]);
         return sendSuccessResponse(
