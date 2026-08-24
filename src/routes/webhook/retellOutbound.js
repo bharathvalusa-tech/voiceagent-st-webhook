@@ -32,8 +32,18 @@ const supabaseService = require('../../services/supabaseService');
 const OUTCOMES = {
     created: 'job created — tech approved',
     declined: 'no job — tech declined',
-    no_match: 'no job created — no valid ServiceTrade location (tech approved)',
+    // The technician answered and approved, but the address is on no ServiceTrade
+    // location — POST /job requires a locationId, so there is nothing to create the job
+    // against. Terminal, and the office email has to say what is needed of a human.
+    no_match: 'no job created — tech APPROVED but the address is on no ServiceTrade location; create the job manually',
     error: 'no job — error creating job',
+    // A deactivated ServiceTrade location does NOT block the job — the technician was
+    // told on the dispatch call and approved anyway. These lines exist so the sheet, the
+    // client email and the office all see the flag without having to look it up.
+    created_inactive: 'job created on an INACTIVE ServiceTrade location — tech approved; office review needed',
+    declined_inactive: 'no job — tech declined (INACTIVE ServiceTrade location)',
+    declined_unmatched: 'no job — tech declined (address NOT on file in ServiceTrade)',
+    inactive_job_failed: 'no job — ServiceTrade rejected the job on an INACTIVE location; manual follow-up needed',
     // A voicemail box answered instead of a person. NOT terminal — the escalation
     // chain must keep dialing the next contact — but it IS a job failure for the
     // row's metrics, so it gets its own trail line.
@@ -65,12 +75,15 @@ const NO_ANSWER_REASONS = new Set([
 // the idempotency guard in the Apps Script `handleJobUpdate`.
 const processedCalls = new Map();
 const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
+// .unref() so this timer never holds the event loop open, matching retell.js:22. Without
+// it the process cannot exit on its own — a test run hangs forever and a serverless
+// instance is kept alive by a cache sweep that has nothing to sweep.
 setInterval(() => {
     const now = Date.now();
     for (const [id, ts] of processedCalls) {
         if (now - ts > IDEMPOTENCY_TTL_MS) processedCalls.delete(id);
     }
-}, 60 * 1000);
+}, 60 * 1000).unref();
 
 // Normalize enum/boolean post-call values ("True"/"false"/1/0/etc.) to a bool,
 // or null when the value is absent/unrecognized (so a missing flag never counts
@@ -108,7 +121,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * the webhook. Skips quietly if the exec URL is unset or we have no
  * inbound_call_id to key the row.
  */
-async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNumber, outcome, terminal = false }) {
+async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNumber, outcome, terminal = false, locationStatus = '' }) {
     const url = config.adaptiveSheetExecUrl;
     if (!url) {
         console.log('[retell-outbound] ADAPTIVE_SHEET_EXEC_URL not set — skipping sheet update');
@@ -133,7 +146,12 @@ async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNum
         // "voicemail" or "nobody picked up" (keep escalating) — all three arrive with
         // servicetrade_job_created = false. Previously GAS had to infer terminality by
         // pattern-matching the outcome wording, which could not make that distinction.
-        terminal: Boolean(terminal)
+        terminal: Boolean(terminal),
+        // 'active' | 'inactive' | '' — the verdict from the ADDRESS at job time, which
+        // outranks the pre-flight gate's verdict on the sheet. Sent only when this
+        // handler actually resolved a location; blank means "no new information, keep
+        // whatever the row already has".
+        location_status: locationStatus || ''
     });
 
     for (let attempt = 1; attempt <= SHEET_NOTIFY_MAX_ATTEMPTS; attempt++) {
@@ -280,6 +298,18 @@ router.post('/retell-outbound', async (req, res) => {
         const custom = analysis.custom_analysis_data || {};
         const collected = call.collected_dynamic_variables || {};
 
+        // The pre-flight verdict GAS injected when it placed this dispatch call. Read
+        // here so a DECLINE can be labelled correctly without a second ServiceTrade
+        // round-trip — the decline path never resolves a location of its own. On the
+        // approve path the freshly-resolved status wins, since it is what the job is
+        // actually created against.
+        const dialledInactive = normalizeBool(vars.inactive_address) === true;
+        // Same source, same reason: GAS sets this when the gate returned 'none', so a
+        // decline on an address that is on no ServiceTrade location is labelled without
+        // re-resolving anything. On the approve path the location lookup runs for real
+        // and its `no_match` verdict is what counts.
+        const dialledUnmatched = normalizeBool(vars.unmatched_address) === true;
+
         // The gates run in this order, and the order is deliberate:
         //   1. nobody answered   2. voicemail   3a. human approved   3b. human declined
         //
@@ -357,9 +387,35 @@ router.post('/retell-outbound', async (req, res) => {
 
         if (jobApproved !== true) {
             console.log(`[retell-outbound] technician answered but did not approve a job (raw: ${JSON.stringify(custom.servicetrade_job_created)}) — call ${callId}, agent ${agentId}; escalation ends`);
+            // 'inactive' first: an address can only be one of the two, and the gate
+            // reports 'inactive' when it resolved a location at all.
+            const declinedOutcome = dialledInactive
+                ? OUTCOMES.declined_inactive
+                : (dialledUnmatched ? OUTCOMES.declined_unmatched : OUTCOMES.declined);
+            const declinedLabel = dialledInactive
+                ? 'Technician Declined (Inactive Location)'
+                : (dialledUnmatched ? 'Technician Declined (Address Not On File)' : 'Technician Declined');
+            // Leave column AD alone on a decline unless the gate said 'inactive'. A row
+            // dialled as 'none' must KEEP 'none' — handleJobUpdate only overwrites on
+            // 'active'/'inactive', so sending 'none' here would be ignored anyway, and
+            // sending '' preserves what the gate wrote.
+            const declinedSheetStatus = dialledInactive ? 'inactive' : '';
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.declined, terminal: true }),
-                sendJobEmail('job_not_created', { reasonCode: 'tech_declined', reasonLabel: 'Technician Declined', reasonMessage: OUTCOMES.declined })
+                notifySheet({
+                    inboundCallId,
+                    outboundCallId: callId,
+                    isJobCreated: false,
+                    jobNumber: '',
+                    outcome: declinedOutcome,
+                    terminal: true,
+                    locationStatus: declinedSheetStatus
+                }),
+                sendJobEmail('job_not_created', {
+                    reasonCode: 'tech_declined',
+                    reasonLabel: declinedLabel,
+                    reasonMessage: declinedOutcome,
+                    locationStatus: dialledInactive ? 'inactive' : (dialledUnmatched ? 'none' : 'active')
+                })
             ]);
             return sendSuccessResponse(
                 res,
@@ -395,34 +451,80 @@ router.post('/retell-outbound', async (req, res) => {
             });
         } catch (createErr) {
             console.error(`[retell-outbound] job creation threw for call ${callId}: ${createErr.message || createErr}`);
+            // A ServiceTrade refusal on a deactivated location is its own story, not a
+            // generic bug: the technician said yes, we tried, and the platform said no.
+            // It gets its own outcome so the office can tell it apart from an outage.
+            const rejectedForInactive = dialledInactive;
+            const errOutcome = rejectedForInactive ? OUTCOMES.inactive_job_failed : OUTCOMES.error;
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true }),
-                sendJobEmail('job_not_created', { reasonCode: 'internal_error', reasonLabel: 'Job Creation Error', reasonMessage: OUTCOMES.error }),
+                notifySheet({
+                    inboundCallId,
+                    outboundCallId: callId,
+                    isJobCreated: false,
+                    jobNumber: '',
+                    outcome: errOutcome,
+                    terminal: true,
+                    locationStatus: rejectedForInactive ? 'inactive' : ''
+                }),
+                sendJobEmail('job_not_created', {
+                    reasonCode: rejectedForInactive ? 'inactive_location_rejected' : 'internal_error',
+                    reasonLabel: rejectedForInactive ? 'ServiceTrade Rejected the Inactive Location' : 'Job Creation Error',
+                    reasonMessage: errOutcome,
+                    locationStatus: rejectedForInactive ? 'inactive' : 'active'
+                }),
                 alertInternal(createErr.message || String(createErr))
             ]);
             return sendErrorResponse(res, createErr.message || 'Job creation failed', 500);
         }
 
         if (jobResult.status === 'no_match') {
-            console.error(`[retell-outbound] tech approved but no confident location match for call ${callId} (agent ${configAgentId})`);
+            // The expected end of the unmatched-address path, not an anomaly: the gate
+            // dialled anyway, the technician was told the address is not on file, and
+            // they said yes. There is still no locationId to create a job against, so
+            // this ends the chain and asks a human for the one thing only a human can
+            // do. Their consent is recorded in the outcome trail and the email.
+            console.error(`[retell-outbound] tech approved but no confident location match for call ${callId} (agent ${configAgentId})${dialledUnmatched ? ' — dialled with the address flagged as not on file' : ''}`);
             await Promise.allSettled([
                 notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match, terminal: true }),
-                sendJobEmail('job_not_created', { reasonCode: 'no_matches', reasonLabel: 'No Location Match', reasonMessage: OUTCOMES.no_match })
+                sendJobEmail('job_not_created', {
+                    reasonCode: 'no_matches',
+                    reasonLabel: 'Technician Approved — No Location On File',
+                    reasonMessage: OUTCOMES.no_match,
+                    locationStatus: 'none'
+                })
             ]);
             return sendSuccessResponse(
                 res,
-                { status: 'no_match', call_id: callId },
-                'Approved, but no confident ServiceTrade location match — manual follow-up needed',
+                { status: 'no_match', call_id: callId, tech_approved: true },
+                'Technician approved, but the address is on no ServiceTrade location — create the job manually',
                 200
             );
         }
 
         const job = jobResult.job || {};
         const jobNumber = job.jobNumber || '';
-        console.log(`[retell-outbound] job created for call ${callId}: location ${jobResult.matchedLocationName} (tier ${jobResult.matchTier}), job_number ${jobNumber}`);
+        // The status resolved from the ADDRESS at job time wins over the pre-flight
+        // verdict — it is the location the job was actually created against.
+        const createdInactive = jobResult.locationStatus === 'inactive';
+        console.log(`[retell-outbound] job created for call ${callId}: location ${jobResult.matchedLocationName} (tier ${jobResult.matchTier}, status ${jobResult.locationStatus}), job_number ${jobNumber}`);
         await Promise.allSettled([
-            notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: true, jobNumber, outcome: OUTCOMES.created, terminal: true }),
-            sendJobEmail('job_created', { jobId: job.jobId, jobUri: job.jobUri, jobNumber })
+            notifySheet({
+                inboundCallId,
+                outboundCallId: callId,
+                isJobCreated: true,
+                jobNumber,
+                outcome: createdInactive ? OUTCOMES.created_inactive : OUTCOMES.created,
+                terminal: true,
+                locationStatus: jobResult.locationStatus || 'active'
+            }),
+            sendJobEmail('job_created', {
+                jobId: job.jobId,
+                jobUri: job.jobUri,
+                jobNumber,
+                locationStatus: jobResult.locationStatus || 'active',
+                locationName: jobResult.matchedLocationName || '',
+                matchedAddress: jobResult.matchedAddress || ''
+            })
         ]);
         return sendSuccessResponse(
             res,
@@ -433,7 +535,10 @@ router.post('/retell-outbound', async (req, res) => {
     } catch (error) {
         console.error('[retell-outbound] error:', error);
         await Promise.allSettled([
-            notifySheet({ inboundCallId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error }),
+            // terminal: true, matching every other error branch. Omitting it defaulted to
+            // false, which left the escalation chain live in the sheet after an
+            // unexpected throw — the row kept dialling with no result ever landing.
+            notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true }),
             sendJobEmail('job_not_created', { reasonCode: 'internal_error', reasonLabel: 'Job Creation Error', reasonMessage: OUTCOMES.error }),
             alertInternal(error.message || String(error))
         ]);

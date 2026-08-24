@@ -13,6 +13,8 @@ const stCreateJobRoutes = require('./routes/serviceTrade/createJob');
 const stCreateJobFromContextRoutes = require('./routes/serviceTrade/createJobFromContext');
 const stCreateServiceRequestRoutes = require('./routes/serviceTrade/createServiceRequest');
 const stMatchLocationRoutes = require('./routes/serviceTrade/matchLocation');
+const stEscalationCompleteRoutes = require('./routes/serviceTrade/escalationComplete');
+const stInboundLookupRoutes = require('./routes/serviceTrade/inboundLookup');
 const retellWebhookRoutes = require('./routes/webhook/retell');
 const retellOutboundWebhookRoutes = require('./routes/webhook/retellOutbound');
 const stAuthRoutes = require('./routes/auth/serviceTradeAuth');
@@ -46,6 +48,8 @@ app.use('/', stCreateJobRoutes);
 app.use('/', stCreateJobFromContextRoutes);
 app.use('/', stCreateServiceRequestRoutes);
 app.use('/', stMatchLocationRoutes);
+app.use('/', stEscalationCompleteRoutes);
+app.use('/', stInboundLookupRoutes);
 app.use('/webhook', retellWebhookRoutes);
 app.use('/webhook', retellOutboundWebhookRoutes);
 app.use('/auth/servicetrade', stAuthRoutes);
@@ -61,3 +65,4 @@ app.get('/health', (req, res) => {
 app.use(errorHandler);
 
 module.exports = app;
+
