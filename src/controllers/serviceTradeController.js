@@ -1,5 +1,6 @@
 const serviceTradeService = require('../services/serviceTradeService');
 const supabaseService = require('../services/supabaseService');
+const { normalizePhone } = require('../utils/phone');
 
 /**
  * Helper function to convert Unix epoch to human-readable date/time
@@ -190,7 +191,6 @@ const getCustomerByPhone = async (fromPhoneNumber, agentId) => {
     // If contact not found, fallback to searching all locations (slower)
     console.log('⚠️ Contact not found, searching all locations (this may take a while)...');
     const locationData = await serviceTradeService.getLocations(supabaseAuthToken);
-    const normalizePhone = (phone) => phone ? phone.replace(/[()-\s]/g, '') : '';
     const locationContactData = locationData.filter(({ primaryContact, phoneNumber }) => {
         const normalizedSearch = normalizePhone(fromPhoneNumber);
         const primaryMatch = primaryContact?.phone
