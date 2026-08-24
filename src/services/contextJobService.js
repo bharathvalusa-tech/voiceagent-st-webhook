@@ -18,8 +18,8 @@ const { findCustomerWithConfidence } = require('./customerMatchingService');
  * @param {string} [fields.from_number]
  * @param {string} [fields.location_name]
  * @param {string} [fields.company_name]
- * @returns {Promise<{status:'matched', locationId:*, locationName:*, tier:*}
- *                   | {status:'inactive_match', locationId:*, locationName:*, matchedAddress:string}
+ * @returns {Promise<{status:'matched', locationId:*, locationName:*, tier:*,
+ *                    locationStatus:'active'|'inactive', matchedAddress:string}
  *                   | {status:'no_match'}>}
  * Throws only on unexpected errors (auth/network); the caller decides how to surface those.
  */
@@ -45,7 +45,11 @@ async function matchLocationFromCallContext(fields) {
         name: customer_name,
         address: service_address,
         locationName: location_name,
-        companyName: company_name
+        companyName: company_name,
+        // Lets the phone index fall back to the `servicetrade_locations` mirror when
+        // ServiceTrade is unreachable. Config maps this agent to the mirrored rows;
+        // without it the fallback cannot tell whose locations to read.
+        stAgentId: agent_id
     });
 
     // Confident-match picker: any Tier 1, or a Tier 2 that resolves to a single
@@ -62,32 +66,40 @@ async function matchLocationFromCallContext(fields) {
         return sel || null;
     };
 
-    // ACTIVE-preferred: a confident match among active (or status-unknown) locations
-    // wins and drives job creation. A job must NEVER be created on an inactive location,
-    // so inactive candidates are excluded here.
+    const formatAddress = (candidate) => {
+        const a = (candidate && candidate.address) || {};
+        return [a.street, a.city, a.state, a.postalCode].filter(Boolean).join(', ').trim();
+    };
+
+    // ACTIVE-preferred: when the same context matches both an active and a deactivated
+    // location, the active one wins. Beyond that preference an inactive location is a
+    // normal match — `inactive` is a ServiceTrade bookkeeping state, not a statement
+    // about whether someone's heating just failed, so it must not stop the dispatch or
+    // the job. Callers get `locationStatus` and flag it through to the technician, the
+    // outcome trail and the client email instead.
     const activeSelected = pickConfident(candidates.filter((c) => c.locationStatus !== 'inactive'));
     if (activeSelected) {
         return {
             status: 'matched',
             locationId: activeSelected.locationId,
             locationName: activeSelected.locationName,
-            tier: activeSelected.tier
+            tier: activeSelected.tier,
+            locationStatus: 'active',
+            matchedAddress: formatAddress(activeSelected)
         };
     }
 
-    // No active match. Is the address a known-but-INACTIVE (deactivated) location?
-    // If so, surface it distinctly so the caller can block dispatch + raise a job-fail
-    // alert. (Same tier logic, restricted to inactive candidates.)
+    // No active match, but the address IS a known deactivated location. Same tier logic,
+    // same 'matched' verdict — only the status differs.
     const inactiveSelected = pickConfident(candidates.filter((c) => c.locationStatus === 'inactive'));
     if (inactiveSelected) {
-        const a = inactiveSelected.address || {};
-        const matchedAddress = [a.street, a.city, a.state, a.postalCode]
-            .filter(Boolean).join(', ').trim();
         return {
-            status: 'inactive_match',
+            status: 'matched',
             locationId: inactiveSelected.locationId,
             locationName: inactiveSelected.locationName,
-            matchedAddress
+            tier: inactiveSelected.tier,
+            locationStatus: 'inactive',
+            matchedAddress: formatAddress(inactiveSelected)
         };
     }
 
@@ -116,7 +128,8 @@ async function matchLocationFromCallContext(fields) {
  * @param {string} [fields.call_id]
  * @param {string} [fields.location_name]
  * @param {string} [fields.company_name]
- * @returns {Promise<{status:'created', job:Object, matchedLocationId:*, matchedLocationName:*, matchTier:*}
+ * @returns {Promise<{status:'created', job:Object, matchedLocationId:*, matchedLocationName:*,
+ *                    matchTier:*, locationStatus:'active'|'inactive', matchedAddress:string}
  *                   | {status:'no_match'}>}
  * Throws only on unexpected errors (auth/network); the caller decides how to surface those.
  */
@@ -148,12 +161,16 @@ async function createJobFromCallContext(fields) {
     }
 
     const selected = { locationId: match.locationId, locationName: match.locationName, tier: match.tier };
+    const isInactive = match.locationStatus === 'inactive';
 
     // Preserve the caller's/alarm's issue text verbatim in the job description.
+    // A deactivated location is tagged in the description too, so the flag is visible
+    // inside ServiceTrade itself and not only in our email and sheet.
     const name = (customer_name || '').trim() || 'Unknown person';
     const phonePart = from_number ? ` (${from_number})` : '';
     const issue = (call_summary || '').trim() || 'emergency service request';
-    const description = `[EMERGENCY - TECH APPROVED]: ${name}${phonePart} reported ${issue}`;
+    const inactiveTag = isInactive ? '[INACTIVE LOCATION]' : '';
+    const description = `[EMERGENCY - TECH APPROVED]${inactiveTag}: ${name}${phonePart} reported ${issue}`;
 
     const job = await createJob(
         {
@@ -170,7 +187,9 @@ async function createJobFromCallContext(fields) {
         job,
         matchedLocationId: selected.locationId,
         matchedLocationName: selected.locationName,
-        matchTier: selected.tier
+        matchTier: selected.tier,
+        locationStatus: match.locationStatus || 'active',
+        matchedAddress: match.matchedAddress || ''
     };
 }
 
