@@ -1,5 +1,6 @@
 const sgMail = require('@sendgrid/mail');
 const config = require('../config/environment');
+const retellService = require('./retellService');
 
 const DEFAULT_APP_URL = 'https://app.servicetrade.com/auth';
 const BRAND_DASHBOARD_URL = 'https://voice.justclara.ai/dashboard';
@@ -230,6 +231,178 @@ const buildHtmlBody = ({ details, cards, footerLines, jobLink, badgeText }) => {
     `;
 };
 
+/**
+ * WS-6: fetch each escalation (dispatch) call so the email can show what happened on
+ * every attempt, not just the final verdict. Best-effort and parallel — a call that
+ * cannot be fetched still gets a line, just without its summary or transcript, because
+ * a missing recording must never cost the client their notification.
+ */
+const fetchEscalationCalls = async (callIds = []) => {
+    const ids = [...new Set(callIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (ids.length === 0) return [];
+
+    return Promise.all(ids.map(async (id, index) => {
+        try {
+            const call = await retellService.getCall(id);
+            return {
+                step: index + 1,
+                callId: id,
+                toNumber: call.to_number || '',
+                summary: (call.call_analysis && call.call_analysis.call_summary) || '',
+                transcript: call.transcript || '',
+                recordingUrl: call.recording_url || '',
+                disconnectionReason: call.disconnection_reason || ''
+            };
+        } catch (e) {
+            console.warn(`[EmailNotificationService] escalation call ${id} could not be fetched: ${e.message || e}`);
+            return { step: index + 1, callId: id, unavailable: true };
+        }
+    }));
+};
+
+/**
+ * The escalation history card: the sheet's outcome trail verbatim, then one block per
+ * dispatch call. Returns null when there is nothing to show, so non-escalation emails
+ * (every other tenant) are completely unaffected.
+ */
+const buildEscalationSection = (details) => {
+    const trail = String(details.outcomeTrail || '').trim();
+    const calls = Array.isArray(details.escalationCalls) ? details.escalationCalls : [];
+    if (!trail && calls.length === 0) return null;
+
+    const lines = [];
+    const rows = [];
+
+    if (trail) {
+        lines.push('Timeline:', ...trail.split('\n').map((l) => `  ${l}`));
+        rows.push(`
+            <div style="margin:0 0 14px 0;">
+                ${renderLabel('Timeline')}
+                <div style="color:#2A2A2A;font-size:15px;line-height:1.55;white-space:pre-wrap;">${escapeHtml(trail)}</div>
+            </div>
+        `);
+    }
+
+    calls.forEach((call) => {
+        const label = `Call ${call.step}${call.toNumber ? ` — ${call.toNumber}` : ''}`;
+
+        if (call.unavailable) {
+            lines.push(`${label}: details unavailable`);
+            rows.push(renderDetailRow(label, 'Call details unavailable'));
+            return;
+        }
+
+        const parts = [];
+        if (call.disconnectionReason) parts.push(`Outcome: ${call.disconnectionReason}`);
+        if (call.summary) parts.push(`Summary: ${call.summary}`);
+        if (call.recordingUrl) parts.push(`Recording: ${call.recordingUrl}`);
+        if (call.transcript) parts.push(`Transcript:\n${call.transcript}`);
+        if (parts.length === 0) parts.push('No answer — nothing recorded');
+
+        lines.push(`${label}:`, ...parts.map((p) => `  ${p}`));
+
+        const recordingHtml = call.recordingUrl
+            ? `<div style="margin:6px 0;"><a href="${escapeHtml(call.recordingUrl)}" style="color:#C0112E;font-weight:500;text-decoration:none;">Listen to recording</a></div>`
+            : '';
+        const transcriptHtml = call.transcript
+            ? `<div style="margin:8px 0 0 0;color:#4A4A4A;font-size:13px;line-height:1.5;white-space:pre-wrap;">${escapeHtml(call.transcript)}</div>`
+            : '';
+
+        rows.push(`
+            <div style="margin:0 0 14px 0;">
+                ${renderLabel(label)}
+                ${renderValue(call.disconnectionReason || 'No answer — nothing recorded')}
+                ${call.summary ? `<div style="margin:6px 0;color:#2A2A2A;font-size:14px;line-height:1.5;">${escapeHtml(call.summary)}</div>` : ''}
+                ${recordingHtml}
+                ${transcriptHtml}
+            </div>
+        `);
+    });
+
+    return { heading: 'Escalation Timeline', lines, rows };
+};
+
+const isInactiveLocation = (details) =>
+    String((details && details.locationStatus) || '').trim().toLowerCase() === 'inactive';
+
+/**
+ * Flag card for a deactivated ServiceTrade location.
+ *
+ * A job on an inactive location is created, not blocked — the technician was told on the
+ * dispatch call and approved anyway. This card exists so the office sees the location
+ * record needs attention, and it renders on BOTH the created and the not-created email.
+ *
+ * locationName / matchedAddress are optional: the Apps Script sends only the status,
+ * because the matched-location detail is already in the outcome trail rendered by the
+ * Escalation Timeline card and did not justify two more sheet columns.
+ */
+const buildInactiveLocationSection = (details) => {
+    if (!isInactiveLocation(details)) return null;
+
+    const name = String(details.locationName || '').trim();
+    const address = String(details.matchedAddress || '').trim();
+
+    const lines = [
+        'This address matches a location marked INACTIVE in ServiceTrade.',
+        'Dispatch went ahead and the technician was told on the call.'
+    ];
+    const rows = [renderDetailRow('Status', 'Inactive in ServiceTrade')];
+
+    if (name) {
+        lines.push(`Location: ${name}`);
+        rows.push(renderDetailRow('Location', name));
+    }
+    if (address) {
+        lines.push(`Matched address: ${address}`);
+        rows.push(renderDetailRow('Matched Address', address));
+    }
+    lines.push('Please review the location record.');
+    rows.push(renderDetailRow('Action', 'Please review the location record in ServiceTrade'));
+
+    return { heading: '⚠️ Inactive ServiceTrade Location', lines, rows };
+};
+
+// The flag goes in the SUBJECT because the office triages these from the inbox.
+const locationFlagPrefix = (details) => {
+    if (isInactiveLocation(details)) return '[Inactive Location] ';
+    if (isUnmatchedLocation(details)) return '[Address Not On File] ';
+    return '';
+};
+
+const isUnmatchedLocation = (details) =>
+    String((details && details.locationStatus) || '').trim().toLowerCase() === 'none';
+
+/**
+ * Flag card for an address that is on no ServiceTrade location at all.
+ *
+ * The sibling of the inactive card, and for the same reason: dispatch went ahead and
+ * the technician decided. The difference is what the office has to DO. An inactive
+ * location still has an id, so the job exists and only the record needs review. Here
+ * there is no locationId, POST /job cannot run, and the job only exists if someone
+ * creates it by hand — so this card asks for that outright.
+ */
+const buildUnmatchedLocationSection = (details) => {
+    if (!isUnmatchedLocation(details)) return null;
+
+    const address = String(details.serviceAddress || details.matchedAddress || '').trim();
+
+    const lines = [
+        'This address does not match any location in ServiceTrade.',
+        'Dispatch went ahead and the technician was told on the call.'
+    ];
+    const rows = [renderDetailRow('Status', 'Not on file in ServiceTrade')];
+
+    if (address) {
+        lines.push(`Address given by the caller: ${address}`);
+        rows.push(renderDetailRow('Address Given', address));
+    }
+
+    lines.push('No job could be created automatically — a location record is needed first.');
+    rows.push(renderDetailRow('Action', 'Create the location, then the job, in ServiceTrade'));
+
+    return { heading: '⚠️ Address Not On File In ServiceTrade', lines, rows };
+};
+
 const buildBaseSections = (details) => {
     const jobLink = details.jobId ? buildServiceTradeJobLink(details) : null;
 
@@ -305,15 +478,25 @@ const composeJobCreatedEmail = (details) => {
         heading: 'Action Taken',
         rows: actionCardRows
     };
+    // Present only for the Adaptive escalation flow; null everywhere else.
+    const escalationSection = buildEscalationSection(details);
+    // At most one of these applies — an address is either on a location or it is not.
+    const inactiveSection = buildInactiveLocationSection(details)
+        || buildUnmatchedLocationSection(details);
     const textSections = [
         callerDetailsSection,
         serviceLocationSection,
         callSummarySection,
-        actionSection
+        actionSection,
+        ...(inactiveSection ? [inactiveSection] : []),
+        ...(escalationSection ? [escalationSection] : [])
     ];
 
     return {
-        subject: `New Service Request Logged - ${details.customerName} | ${details.emergencyType}`,
+        // The flag goes in the SUBJECT, not only the body: the office triages these from
+        // the inbox, and a job logged against a deactivated location needs picking out
+        // without opening it.
+        subject: `${locationFlagPrefix(details)}New Service Request Logged - ${details.customerName} | ${details.emergencyType}`,
         text: buildTextBody({
             introLine: 'Hi Team,',
             sections: textSections,
@@ -330,7 +513,9 @@ const composeJobCreatedEmail = (details) => {
                 callerDetailsSection,
                 serviceLocationSection,
                 callSummarySection,
-                actionCard
+                actionCard,
+                ...(inactiveSection ? [inactiveSection] : []),
+                ...(escalationSection ? [escalationSection] : [])
             ],
             footerLines: [
                 'Expected callback: Within 10 minutes',
@@ -380,17 +565,25 @@ const composeJobNotCreatedEmail = (details) => {
         actionCardRows.push(renderDetailRow('Validation Details', details.validationSummary));
     }
     actionCardRows.push(renderDetailRow('Call Time', `${details.timestampCentral} (Central Time)`));
+    // Present only for the Adaptive escalation flow; null everywhere else.
+    const escalationSection = buildEscalationSection(details);
+    // At most one of these applies — an address is either on a location or it is not.
+    const inactiveSection = buildInactiveLocationSection(details)
+        || buildUnmatchedLocationSection(details);
     const textSections = [
         callerDetailsSection,
         serviceLocationSection,
         callSummarySection,
-        actionSection
+        actionSection,
+        ...(inactiveSection ? [inactiveSection] : []),
+        ...(escalationSection ? [escalationSection] : [])
     ];
 
     const isNotServiceCall = details.reasonCode === 'not_a_service_call';
+    const inactivePrefix = locationFlagPrefix(details);
     const subject = isNotServiceCall
-        ? `Not a Service Call - ${details.customerName} | ${details.emergencyType}`
-        : `Service Request Needs Review - ${details.customerName} | ${details.emergencyType}`;
+        ? `${inactivePrefix}Not a Service Call - ${details.customerName} | ${details.emergencyType}`
+        : `${inactivePrefix}Service Request Needs Review - ${details.customerName} | ${details.emergencyType}`;
     const badgeText = isNotServiceCall ? 'Not a Service Call' : 'Manual Review Needed';
 
     return {
@@ -412,7 +605,9 @@ const composeJobNotCreatedEmail = (details) => {
                 {
                     heading: 'Action Taken',
                     rows: actionCardRows
-                }
+                },
+                ...(inactiveSection ? [inactiveSection] : []),
+                ...(escalationSection ? [escalationSection] : [])
             ],
             footerLines: [
                 'Please review and take necessary action if required.',
@@ -519,8 +714,15 @@ class EmailNotificationService {
             return { sent: false, skipped: true, reason: 'no_recipients' };
         }
 
+        // WS-6 (Adaptive escalation only): pull each dispatch call from Retell so the
+        // email can show the full escalation history. Done here rather than in the
+        // compose helpers because those are synchronous. No ids -> no fetch, so every
+        // other caller is untouched.
+        const escalationCalls = await fetchEscalationCalls(details.escalationCallIds);
+
         const normalizedDetails = {
             ...details,
+            escalationCalls,
             customerName: details.customerName || 'Unknown Caller',
             callerPhone: details.callerPhone || 'Not provided',
             serviceAddress: formatAddress(details.serviceAddress),
@@ -574,3 +776,4 @@ class EmailNotificationService {
 }
 
 module.exports = new EmailNotificationService();
+

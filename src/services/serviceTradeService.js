@@ -305,6 +305,40 @@ class ServiceTradeService {
         }
     }
 
+
+
+    /**
+     * EVERY customer location, unfiltered — the raw GET /location list, one request
+     * per page, including those with no phone at all.
+     *
+     * getLocations() below drops any location without `phoneNumber` or
+     * `primaryContact.phone`, which silently loses a site whose only number is on
+     * `primaryContact.mobile` or `.alternatePhone`. The phone index needs all four
+     * fields, so it needs the raw list.
+     */
+    async getAllLocations(authToken) {
+        const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+        const headers = { Cookie: cookieValue, 'Content-Type': 'application/json' };
+
+        const fetchPage = async (page) => {
+            const response = await fetch(`${this.baseUrl}/location?page=${page}&limit=1000`, { method: 'GET', headers });
+            if (!response.ok) {
+                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+            }
+            const { data } = await response.json();
+            return data || {};
+        };
+
+        const first = await fetchPage(1);
+        const totalPages = first.totalPages || 1;
+        if (totalPages <= 1) return first.locations || [];
+
+        const rest = await Promise.all(
+            Array.from({ length: totalPages - 1 }, (_, i) => fetchPage(i + 2))
+        );
+        return [first.locations || [], ...rest.map((d) => d.locations || [])].flat();
+    }
+
     async getLocations(authToken) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;

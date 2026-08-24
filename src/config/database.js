@@ -1,4 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
+// Same .env.local-then-.env order as src/config/environment.js — this module is
+// imported directly by some routes without going through it.
+require('dotenv').config({ path: '.env.local' });
 require('dotenv').config();
 
 const supabase = createClient(
