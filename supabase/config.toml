@@ -1,0 +1,12 @@
+# Minimal Supabase CLI config — enough to deploy the sync-locations Edge Function
+# without `supabase init` scaffolding a full local-dev stack this repo does not use.
+
+project_id = "tpvserzjhmyxjssabokm"
+
+[functions.sync-locations]
+# Explicit, though it is also the default. This one line is why the sync needs no
+# bespoke shared secret: Supabase rejects any call without a valid project JWT before
+# the function body runs, so pg_cron authenticating with the service-role key IS the
+# access control. Deploying with --no-verify-jwt would silently make the endpoint
+# public, and it holds a ServiceTrade session plus service-role database access.
+verify_jwt = true
