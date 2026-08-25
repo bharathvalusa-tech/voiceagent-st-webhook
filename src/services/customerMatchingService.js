@@ -1,68 +1,27 @@
 const config = require('../config/environment');
 const serviceTradeService = require('./serviceTradeService');
+const locationPhoneIndex = require('./locationPhoneIndex');
 
-const normalizePhone = (phone) => (phone || '').replace(/[^\d]/g, '');
-const normalizeText = (text) =>
-    (text || '')
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+// Compare on the LAST TEN digits, not on every digit — and strip extensions first.
+// See src/utils/phone.js for why the order matters.
+const { normalizePhone } = require('../utils/phone');
 
-const tokenSimilarity = (a, b) => {
-    const aTokens = new Set(normalizeText(a).split(' ').filter(Boolean));
-    const bTokens = new Set(normalizeText(b).split(' ').filter(Boolean));
-    if (aTokens.size === 0 || bTokens.size === 0) return 0;
-    const intersection = new Set([...aTokens].filter((token) => bTokens.has(token)));
-    const union = new Set([...aTokens, ...bTokens]);
-    return intersection.size / union.size;
-};
-
-const bigramSimilarity = (a, b) => {
-    const aNorm = normalizeText(a);
-    const bNorm = normalizeText(b);
-    if (aNorm.length < 2 || bNorm.length < 2) return 0;
-    const aBigrams = new Map();
-    for (let i = 0; i < aNorm.length - 1; i += 1) {
-        const bigram = aNorm.slice(i, i + 2);
-        aBigrams.set(bigram, (aBigrams.get(bigram) || 0) + 1);
-    }
-    let intersection = 0;
-    for (let i = 0; i < bNorm.length - 1; i += 1) {
-        const bigram = bNorm.slice(i, i + 2);
-        const count = aBigrams.get(bigram) || 0;
-        if (count > 0) {
-            intersection += 1;
-            aBigrams.set(bigram, count - 1);
-        }
-    }
-    const total = (aNorm.length - 1) + (bNorm.length - 1);
-    return total === 0 ? 0 : (2 * intersection) / total;
-};
-
-const fuzzySimilarity = (a, b) => Math.max(tokenSimilarity(a, b), bigramSimilarity(a, b));
-
+// Address comparison helpers — normalisation, fuzzy similarity and the query shapes used
+// to match a spoken address against a stored one. Extracted to src/utils/address.js so
+// routes can reuse them without requiring this whole service.
+const {
+    normalizeText,
+    fuzzySimilarity,
+    dedupeStrings,
+    buildAddressSearchQueries,
+    hasAddressQueryMatch,
+    addressSimilarity
+} = require('../utils/address');
 const getSearchPrefix = (name, prefixLen = 5) => {
     const trimmed = (name || '').trim();
     if (trimmed.length <= prefixLen) return trimmed;
     return trimmed.slice(0, prefixLen);
 };
-
-const STREET_SUFFIX_TOKENS = new Set([
-    'street', 'st', 'avenue', 'ave', 'road', 'rd', 'drive', 'dr', 'boulevard', 'blvd',
-    'lane', 'ln', 'court', 'ct', 'circle', 'cir', 'parkway', 'pkwy', 'terrace', 'ter',
-    'place', 'pl', 'way', 'highway', 'hwy'
-]);
-
-const UNIT_TOKENS = new Set([
-    'unit', 'suite', 'ste', 'apt', 'apartment', 'floor', 'fl', 'building', 'bldg'
-]);
-
-const DIRECTIONAL_TOKENS = new Set([
-    'n', 's', 'e', 'w', 'north', 'south', 'east', 'west'
-]);
-
-const dedupeStrings = (values) => [...new Set(values.filter(Boolean))];
 
 const dedupeLocationsById = (locations) => {
     const uniqueLocations = new Map();
@@ -75,66 +34,6 @@ const dedupeLocationsById = (locations) => {
     return Array.from(uniqueLocations.values());
 };
 
-const buildAddressSearchQueries = (address) => {
-    if (!address) return [];
-
-    const rawAddress = String(address).trim();
-    if (!rawAddress) return [];
-
-    const [streetSegment] = rawAddress.split(',').map((segment) => segment.trim()).filter(Boolean);
-    const normalizedStreetTokens = normalizeText(streetSegment || rawAddress).split(' ').filter(Boolean);
-
-    const houseNumberIndex = normalizedStreetTokens.findIndex((token) => /^\d+[a-z]?$/i.test(token));
-    if (houseNumberIndex === -1) {
-        return dedupeStrings([streetSegment, rawAddress]);
-    }
-
-    const houseNumber = normalizedStreetTokens[houseNumberIndex];
-    const streetTokens = normalizedStreetTokens
-        .slice(houseNumberIndex + 1)
-        .filter((token) => !UNIT_TOKENS.has(token) && !/^\d+[a-z]?$/i.test(token));
-
-    const suffixIndex = streetTokens.findIndex((token) => STREET_SUFFIX_TOKENS.has(token));
-    const coreStreetTokens = (suffixIndex === -1 ? streetTokens : streetTokens.slice(0, suffixIndex)).slice(0, 3);
-    const streetTokensWithoutDirectional = coreStreetTokens.filter(
-        (token, index) => !(index === 0 && DIRECTIONAL_TOKENS.has(token))
-    );
-
-    const shortQueries = [];
-    if (coreStreetTokens.length > 0) {
-        shortQueries.push(`${houseNumber} ${coreStreetTokens.join(' ')}`);
-    }
-    if (streetTokensWithoutDirectional.length > 0) {
-        shortQueries.push(`${houseNumber} ${streetTokensWithoutDirectional.join(' ')}`);
-    }
-
-    return dedupeStrings([
-        ...shortQueries,
-        streetSegment,
-        rawAddress
-    ]);
-};
-
-const hasAddressQueryMatch = (leftAddress, rightAddress) => {
-    const leftQueries = new Set(buildAddressSearchQueries(leftAddress).map((query) => normalizeText(query)));
-    const rightQueries = new Set(buildAddressSearchQueries(rightAddress).map((query) => normalizeText(query)));
-
-    if (leftQueries.size === 0 || rightQueries.size === 0) {
-        return false;
-    }
-
-    return [...leftQueries].some((query) => rightQueries.has(query));
-};
-
-const addressSimilarity = (a, b) => {
-    const aNorm = normalizeText(a);
-    const bNorm = normalizeText(b);
-    if (!aNorm || !bNorm) return 0;
-    if (aNorm === bNorm) return 1;
-    if (aNorm.includes(bNorm) || bNorm.includes(aNorm)) return 0.9;
-    return fuzzySimilarity(aNorm, bNorm);
-};
-
 const logMatchEvent = (message, context = {}) => {
     console.log(JSON.stringify({ level: 'info', message, ...context }));
 };
@@ -144,7 +43,13 @@ const buildCandidate = ({ contact, location, source }) => {
         source,
         contactId: contact?.id || null,
         contactName: contact ? `${contact.firstName || ''} ${contact.lastName || ''}`.trim() : '',
-        contactPhone: contact?.phone || contact?.mobile || contact?.alternatePhone || '',
+        // Fall back to the LOCATION's own main line when there is no contact. A site
+        // whose only number is `Location.phoneNumber` reaches us through the location
+        // phone index with `contact: null`; without this fallback its candidate carries
+        // no phone at all, `phoneExact` is false, and it can never reach Tier 1 on the
+        // phone — which is the one case locationPhoneIndex.js exists to serve.
+        contactPhone: contact?.phone || contact?.mobile || contact?.alternatePhone
+            || location?.phoneNumber || '',
         contactEmail: contact?.email || '',
         locationId: location?.id || null,
         locationName: location?.name || '',
@@ -398,13 +303,29 @@ const determineMatchQuality = (candidate, searchData, allCandidates) => {
     };
 };
 
-const searchByPhone = async (authToken, phone) => {
-    const contacts = await serviceTradeService.searchContacts(authToken, phone);
+// A contact attached to more locations than this identifies nobody. ServiceTrade
+// accounts carry system/catch-all contacts — Adaptive's "Service Trade Work
+// Acknowledgements" is on 103 of their 393 locations — and fanning one of those out
+// produces a hundred candidates that can never resolve to a confident match, at the
+// cost of building them on every call.
+const MAX_CONTACT_LOCATION_FANOUT = 8;
+
+const searchByPhone = async (authToken, phone, stAgentId) => {
+    // ServiceTrade's `search=` does NOT match an E.164 string: "+14169012663" returns
+    // zero contacts where "4169012663" returns the right one. Always query the
+    // ten-digit form.
     const normalizedSearch = normalizePhone(phone);
+    if (!normalizedSearch) {
+        logMatchEvent('phone_search_skipped_unusable_number', { phone });
+        return [];
+    }
+
+    const contacts = await serviceTradeService.searchContacts(authToken, normalizedSearch);
     const candidates = [];
 
     logMatchEvent('phone_search_contacts_fetched', {
         phone,
+        query: normalizedSearch,
         contactsCount: contacts.length
     });
 
@@ -413,11 +334,19 @@ const searchByPhone = async (authToken, phone) => {
         const hasMatch = phones.some((p) => normalizePhone(p) === normalizedSearch);
         if (!hasMatch) return;
 
-        if (Array.isArray(contact.locations) && contact.locations.length > 0) {
-            contact.locations.forEach((location) => {
-                candidates.push(buildCandidate({ contact, location, source: 'phone' }));
+        const locations = Array.isArray(contact.locations) ? contact.locations : [];
+        if (locations.length > MAX_CONTACT_LOCATION_FANOUT) {
+            logMatchEvent('phone_search_contact_rejected_fanout', {
+                phone: normalizedSearch,
+                contactId: contact.id,
+                locationCount: locations.length
             });
+            return;
         }
+
+        locations.forEach((location) => {
+            candidates.push(buildCandidate({ contact, location, source: 'phone' }));
+        });
     });
 
     if (candidates.length > 0) {
@@ -429,14 +358,40 @@ const searchByPhone = async (authToken, phone) => {
         return candidates;
     }
 
-    // Phone not found in contacts - rely on other search methods (location name, company, address)
-    // Removed slow getLocations() fallback for performance (was taking 2-3 minutes)
-    // Customers always provide location/company name or address, so other searches will find it
-    logMatchEvent('phone_search_contact_not_found_no_fallback', { 
-        phone,
-        reason: 'Relying on location/company/address searches for better performance'
-    });
+    // No usable contact hit. Fall back to the location phone index — a site's own main
+    // line (Location.phoneNumber) lives on the location, so /contact?search= can never
+    // find it. The index is one cached request, not the multi-minute scan the old
+    // getLocations() fallback was.
+    try {
+        const hit = await locationPhoneIndex.lookupByPhone(
+            authToken, normalizedSearch, authToken, stAgentId
+        );
+        if (hit) {
+            logMatchEvent('phone_search_location_index_hit', {
+                phone: normalizedSearch,
+                locationId: hit.locationId,
+                locationStatus: hit.locationStatus
+            });
+            return [
+                buildCandidate({
+                    contact: null,
+                    location: {
+                        id: hit.locationId,
+                        name: hit.locationName,
+                        status: hit.locationStatus,
+                        address: hit.address
+                    },
+                    source: 'location_phone'
+                })
+            ];
+        }
+    } catch (error) {
+        // Never let the index take the whole match down — the address/name searches
+        // still run in parallel and can resolve this call on their own.
+        console.error(`[matching] location phone index lookup failed: ${error.message || error}`);
+    }
 
+    logMatchEvent('phone_search_no_match', { phone: normalizedSearch });
     return candidates;
 };
 
@@ -581,8 +536,106 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
     let addressCandidates = [];
     let directAddressLocationIds = new Set();
 
+    // PHONE FIRST, and authoritative when it is unambiguous.
+    //
+    // A caller number that resolves to exactly ONE ServiceTrade location identifies the
+    // site by itself — it needs no corroboration from a spoken address, and it must not
+    // be second-guessed by one. Both of those used to happen: the address-direct filter
+    // below discards any candidate outside `directAddressLocationIds`, so a correct
+    // phone match lost to a fuzzy address hit on a different site.
+    //
+    // Ambiguity still falls through. 19 of the 110 distinct numbers on the Adaptive
+    // account sit on more than one location (head-office lines, property managers);
+    // those identify nothing on their own and need the address path.
+    let prefetchedPhoneCandidates = null;
+    if (searchData.phone && normalizePhone(searchData.phone).length === 10) {
+        prefetchedPhoneCandidates = await searchByPhone(authToken, searchData.phone, searchData.stAgentId);
+
+        // BOTH sources have to agree before this settles anything.
+        //
+        // searchByPhone consults the location index only when contact search came back
+        // empty, so a number found on ONE contact looks unique even while the same
+        // number is the main line of two other locations. Live example on this account:
+        // 416-555-0118 is on a contact at "Northvale(500 Ridgeway Ave. E)" and on the
+        // main line of two further Northvale sites — three candidates, one of which the
+        // contact path would have settled on alone. The address search used to be able
+        // to correct that; a short-circuit cannot, so it must not fire.
+        let indexLocationIds = [];
+        try {
+            const indexHits = await locationPhoneIndex.lookupAllByPhone(
+                authToken, searchData.phone, authToken, searchData.stAgentId
+            );
+            indexLocationIds = indexHits.map((hit) => hit.locationId).filter(Boolean);
+        } catch (error) {
+            // The index being unavailable must not turn into a confident single match.
+            // Skip the short-circuit and let the full fan-out decide.
+            console.error(`[matching] phone-first index check failed, deferring to the full search: ${error.message || error}`);
+            indexLocationIds = null;
+        }
+
+        const phoneLocationIds = indexLocationIds === null ? [] : [...new Set([
+            ...prefetchedPhoneCandidates.map((candidate) => candidate.locationId).filter(Boolean),
+            ...indexLocationIds
+        ])];
+
+        if (phoneLocationIds.length === 1) {
+            const settled = prefetchedPhoneCandidates
+                .filter((candidate) => candidate.locationId === phoneLocationIds[0])
+                .map((candidate) => ({
+                    ...candidate,
+                    ...determineMatchQuality(candidate, searchData, prefetchedPhoneCandidates),
+                    tier: 1,
+                    tierReason: 'phone_match_single_location',
+                    // searchByPhone already verified this number against the contact's
+                    // phone/mobile/alternate, or came from the location's own line. The
+                    // recomputed flag can read false when the match was on `mobile` while
+                    // `contactPhone` holds `phone`, so state what we know instead.
+                    phoneExact: true
+                }));
+
+            // The union can name a location that only the INDEX knew about, leaving no
+            // contact candidate to settle on. Reachable when the index lookup inside
+            // searchByPhone throws and is caught, then lookupAllByPhone succeeds. Fall
+            // through to the full search rather than indexing into an empty array.
+            if (settled.length > 0) {
+                logMatchEvent('phone_first_settled_match', {
+                    phone: searchData.phone,
+                    locationId: phoneLocationIds[0],
+                    locationName: settled[0].locationName,
+                    locationStatus: settled[0].locationStatus,
+                    candidateCount: settled.length,
+                    // Recorded so a settled match is auditable: both the contact graph
+                    // and the location index pointed at this one location, nothing else.
+                    corroboratedBy: ['contact_search', 'location_phone_index'],
+                    skippedSearches: ['name', 'location_name', 'address', 'company_name']
+                });
+                return settled;
+            }
+
+            logMatchEvent('phone_first_no_candidate_to_settle', {
+                phone: searchData.phone,
+                locationId: phoneLocationIds[0],
+                reason: 'location_known_only_to_the_index'
+            });
+        }
+
+        logMatchEvent('phone_first_not_settled', {
+            phone: searchData.phone,
+            distinctLocationIds: phoneLocationIds.length,
+            contactLocationIds: [...new Set(prefetchedPhoneCandidates.map((c) => c.locationId).filter(Boolean))].length,
+            indexLocationIds: indexLocationIds === null ? 'unavailable' : [...new Set(indexLocationIds)].length,
+            reason: indexLocationIds === null
+                ? 'index_unavailable'
+                : (phoneLocationIds.length === 0 ? 'no_phone_candidates' : 'ambiguous_across_locations')
+        });
+    }
+
     if (searchData.phone) {
-        tasks.push(searchByPhone(authToken, searchData.phone));
+        // Reuse the fetch above rather than querying ServiceTrade for the same number
+        // twice; only search afresh when the short-circuit was skipped outright.
+        tasks.push(prefetchedPhoneCandidates
+            ? Promise.resolve(prefetchedPhoneCandidates)
+            : searchByPhone(authToken, searchData.phone, searchData.stAgentId));
         taskLabels.push('phone');
     }
     if (searchData.name) {

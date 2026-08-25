@@ -2,9 +2,10 @@
 
 > Scope: the **Adaptive Climate** emergency-dispatch pipeline only. It spans three
 > codebases: this repo (`voiceagent-st-webhook`), `vercel-webhook-integration`
-> (`api/adaptiveclimate.py`), and the Google Apps Script web app
-> (`vercel-webhook-integration/appscript/adaptiveclimate.gs`). The Apps Script is
+> (`api/adaptiveclimate.py`), and the Google Apps Script web app, whose source is
+> mirrored in THIS repo at `google-sheet/code.gs` (gitignored). The Apps Script is
 > deployed separately as a `/exec` web app; it is **not** run from this repo.
+> There is no `vercel-webhook-integration/appscript/` directory — that path was stale.
 
 ## 1. Pipeline at a glance
 
@@ -165,6 +166,13 @@ separates them before deciding anything, and tells the sheet which one it was:
 | 3a | Human answered, approved | `servicetrade_job_created = true` | **yes** | yes → success email |
 | 3b | Human answered, declined | `servicetrade_job_created = false` | no | yes → job-failure email |
 
+An **inactive** ServiceTrade location changes none of these gates. It is flagged, not
+blocked: the job is created on approval exactly as for an active location, and the only
+difference is the wording — `created_inactive` / `declined_inactive` on the trail, an
+`[INACTIVE LOCATION]` job-description tag, and an `[Inactive Location]` subject prefix on
+the client email. A ServiceTrade refusal on an inactive location has its own outcome,
+`inactive_job_failed`, so it can be told apart from an outage.
+
 The order matters. Gates 1 and 2 can both look true on the same call — the analyzer flags
 `reached_voicemail` while telephony reports the dial as unanswered — so no-answer is checked
 first and wins the label: what the carrier reports about the connection outranks what the
@@ -206,17 +214,26 @@ derive it, since all three cases used to read as `no job — tech declined`.
   3. **Delay gate** (`canMakeCall`, `DELAY_MINUTES = 5`).
   4. **Pre-flight ServiceTrade location gate (first call only)** — before the very
      first escalation call, `matchesServiceTradeLocation()` POSTs to
-     `voiceagent-st-webhook /st-match-location` (`CONFIG.ST_MATCH_URL`). If the caller's
-     address can't be confidently matched to a ServiceTrade location, the post-call job
-     would only fail — so **no call is placed**: the row is marked terminal
-     (`make_call=false`, `escalation_complete=true`, `is_job_created=false`), an outcome
-     `no call — address not matched to a ServiceTrade location; manual follow-up needed`
-     is appended, and the manual-review client email is sent. **Fail-open:** any endpoint
-     error / non-200 → the call is placed anyway (a transient outage never suppresses a
-     real emergency). Uses the same matcher as post-call creation, so the gate's verdict
-     and the eventual create verdict can't drift. The **passing** path also appends a line
-     (`location matched (…) — dispatching`, or `⚠️ location gate failed open (…)`), so a
-     genuine match can be told apart from a fail-open when reading the sheet afterwards.
+     `voiceagent-st-webhook /st-match-location` (`CONFIG.ST_MATCH_URL`). The verdict is
+     written to column AD `location_status` and decides only whether we dial:
+     - `active` → dial.
+     - `inactive` → **dial anyway.** Deactivation is a ServiceTrade bookkeeping state and
+       says nothing about whether the emergency is real; 147 of the account's 393
+       locations are inactive. The technician is dialled, told on the call
+       (`{{inactive_address}}` / `{{location_status_note}}`), emailed with an
+       `[INACTIVE LOCATION]` subject prefix, and their yes or no decides the job exactly
+       as it would for an active location.
+     - `none` → **terminal, no call.** There is no `locationId`, so `POST /job` is
+       impossible (`required: ['locationId','type']`). Outcome
+       `no job created — no valid ServiceTrade location for the address`, manual-review
+       client email.
+
+     **Fail-open:** any endpoint error / non-200 → the call is placed anyway and AD reads
+     `failed_open` (a transient outage never suppresses a real emergency). Uses the same
+     matcher as post-call creation, so the gate's verdict and the eventual create verdict
+     can't drift; when they do differ, the post-call one wins and overwrites AD. Every
+     path appends a trail line, so a genuine match, a deactivated location and a fail-open
+     are all distinguishable when reading the sheet afterwards.
   5. **First / next call** — `checkAnsweredAndComplete(callId, stepN)` on the prior
      call returns `stop` | `pending` | `continue`; on `continue` (no answer) the
      next contact is dialed and the counter advances. It re-fetches the call on every
@@ -226,18 +243,23 @@ derive it, since all three cases used to read as `no job — tech declined`.
 - **Voicemail is not an answer.** `classifyCall` returns `no_answer` for
   `voicemail_reached`, for `call_analysis.in_voicemail`, and for the outbound agent's own
   `reached_voicemail` verdict — so the chain keeps escalating to the next contact. The
+  voicemail check sits **above** the ANSWERED disconnection-reason set: an answering
+  machine that takes Clara's message and hangs up ends as `user_hangup`/`agent_hangup`, and
+  with the check below that set the hangup reason won and the chain stopped with nobody
+  reached. It stays below the no-answer set, so the carrier still outranks the analyzer.
+  Gate order is no-answer → voicemail → answered, matching `retellOutbound.js`. The
   outbound webhook records `no job — reached voicemail; no technician contact` on the row
   without marking it terminal.
 - **No service address → terminal before any dial.** If the inbound row lands with a blank
   `service_address`, `doPost` marks it complete, appends
   `no job — call ended before a service address was captured; manual follow-up needed`, and
   sends the manual-review client email. No escalation call is placed.
-- **Stop conditions:** no ServiceTrade location match (pre-flight gate, first call) ·
-  no service address captured · answered call (WS-1) · job created, declined, or
+- **Stop conditions:** no ServiceTrade location match at all (pre-flight gate, first
+  call) · no service address captured · answered call (WS-1) · job created, declined, or
   approved-but-failed — any `terminal` `job_update` (`handleJobUpdate`) ·
   automated-caller cooldown (WS-2) · max attempts exhausted.
-- **Not stop conditions:** voicemail and no-answer. Both write an outcome line and the chain
-  continues to the next contact.
+- **Not stop conditions:** voicemail, no-answer, and an **inactive** location. All three
+  write an outcome line and the chain continues.
 
 ## 5. Outbound write-back — `handleJobUpdate`
 
@@ -271,7 +293,7 @@ outbound_call_id, is_job_created, job_number, outcome, terminal }`. GAS:
 - **WS-3 upsert** collapses sequential re-deliveries of the same inbound `call_id`
   into one row; **WS-4** stops our own outbound calls from ever inserting a row.
 
-## 7. Column-population lifecycle (`Sheet1`, A–AC)
+## 7. Column-population lifecycle (`Sheet1`, A–AD)
 
 | Col | Field | Owner | When written |
 |-----|-------|-------|--------------|
@@ -304,6 +326,7 @@ outbound_call_id, is_job_created, job_number, outcome, terminal }`. GAS:
 | AA | **outcome** | GAS trail + webhook | appended per event (WS-5 trail + job result) |
 | AB | **job_number** | webhook (`job_update`) | job created |
 | AC | **is_job_created** | webhook (`job_update`) | job result |
+| AD | **location_status** | GAS gate + webhook | `active`/`inactive`/`none`/`failed_open`; pre-flight writes it, `job_update` overwrites it |
 
 **Final fields** (bold above) are settled at the terminal state — a resolution
 (answered / job created) or `MAX_ESCALATION_ATTEMPTS` exhausted. `outcome`

@@ -1,0 +1,190 @@
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const REPO = path.join(__dirname, '..');
+
+/**
+ * Load google-sheet/code.gs into a sandbox with the Apps Script globals stubbed.
+ *
+ * There is no way to run Apps Script locally, and no test suite in the repo, so the
+ * escalation state machine is exercised by evaluating the real source against fake
+ * SpreadsheetApp / UrlFetchApp / PropertiesService / LockService objects and asserting
+ * on what it wrote and what it called.
+ */
+// google-sheet/code.gs is GITIGNORED — it is the deployed Apps Script, mirrored here but
+// never committed. So it is simply absent on a fresh clone and in CI, and reading it
+// unconditionally turned every Apps Script test into an ENOENT crash.
+const APPS_SCRIPT_PATH = path.join(REPO, 'google-sheet', 'code.gs');
+const appsScriptAvailable = () => fs.existsSync(APPS_SCRIPT_PATH);
+
+function loadAppsScript({ rows = [], fetchHandler, properties = {}, config = {} } = {}) {
+    if (!appsScriptAvailable()) {
+        throw new Error(`google-sheet/code.gs not found — guard the test with skipIfNoAppsScript()`);
+    }
+    let source = fs.readFileSync(APPS_SCRIPT_PATH, 'utf8');
+
+    // CONFIG is a top-level `const`, so it is a lexical binding inside the vm context
+    // and never appears on the sandbox object — a test cannot reach in and set a value.
+    // Patch the literal in the source instead. Only string and array entries are
+    // supported, which is all the test knobs are.
+    for (const [key, value] of Object.entries(config)) {
+        const literal = JSON.stringify(value);
+        const pattern = new RegExp('(\\n\\s*' + key + ':\\s*)(\\[[^\\]]*\\]|\'[^\']*\'|"[^"]*")', 'm');
+        if (!pattern.test(source)) {
+            throw new Error(`loadAppsScript: no CONFIG.${key} literal found to override`);
+        }
+        source = source.replace(pattern, (m, prefix) => prefix + literal);
+    }
+
+    const NUM_COLS = 30;
+    const grid = rows.map((r) => {
+        const row = Array.from({ length: NUM_COLS }, (_, i) => (r[i] === undefined ? '' : r[i]));
+        return row;
+    });
+
+    const flushes = { count: 0 };
+    const fetches = [];
+
+    const makeRange = (rowIdx, colIdx, numRows, numCols) => ({
+        getValue: () => (grid[rowIdx - 2] ? grid[rowIdx - 2][colIdx - 1] : ''),
+        setValue: (v) => {
+            while (grid.length < rowIdx - 1) grid.push(Array(NUM_COLS).fill(''));
+            if (!grid[rowIdx - 2]) grid[rowIdx - 2] = Array(NUM_COLS).fill('');
+            grid[rowIdx - 2][colIdx - 1] = v;
+        },
+        getValues: () => {
+            const out = [];
+            for (let r = 0; r < numRows; r++) {
+                const src = grid[rowIdx - 2 + r] || Array(NUM_COLS).fill('');
+                out.push(src.slice(colIdx - 1, colIdx - 1 + numCols));
+            }
+            return out;
+        },
+        setValues: (vals) => {
+            vals.forEach((v, r) => {
+                if (!grid[rowIdx - 2 + r]) grid[rowIdx - 2 + r] = Array(NUM_COLS).fill('');
+                v.forEach((cell, c) => { grid[rowIdx - 2 + r][colIdx - 1 + c] = cell; });
+            });
+        }
+    });
+
+    const sheet = {
+        getRange: (a, b, c, d) => makeRange(a, b, c || 1, d || 1),
+        getLastRow: () => grid.length + 1,
+        getLastColumn: () => NUM_COLS,
+        getMaxColumns: () => NUM_COLS,
+        appendRow: (r) => grid.push(r)
+    };
+
+    const sandbox = {
+        console,
+        JSON,
+        Date,
+        Math,
+        String,
+        Number,
+        Boolean,
+        Object,
+        Array,
+        parseInt,
+        parseFloat,
+        isNaN,
+        encodeURIComponent,
+        RegExp,
+        Error,
+        SpreadsheetApp: {
+            getActiveSpreadsheet: () => ({ getSheetByName: () => sheet, getSheets: () => [sheet] }),
+            openById: () => ({ getSheetByName: () => sheet, getSheets: () => [sheet] }),
+            flush: () => { flushes.count += 1; }
+        },
+        UrlFetchApp: {
+            fetch: (url, options) => {
+                fetches.push({ url, options });
+                const res = fetchHandler ? fetchHandler(url, options) : { code: 200, body: '{}' };
+                return {
+                    getResponseCode: () => res.code,
+                    getContentText: () => res.body
+                };
+            }
+        },
+        PropertiesService: {
+            getScriptProperties: () => ({
+                getProperty: (k) => (k in properties ? properties[k] : null),
+                setProperty: (k, v) => { properties[k] = v; },
+                deleteProperty: (k) => { delete properties[k]; },
+                getProperties: () => ({ ...properties })
+            })
+        },
+        LockService: {
+            getScriptLock: () => ({ waitLock: () => true, releaseLock: () => {} })
+        },
+        Utilities: {
+            formatDate: (date, tz, fmt) => {
+                const pad = (n) => String(n).padStart(2, '0');
+                const d = new Date(date);
+                return fmt
+                    .replace('dd', pad(d.getUTCDate()))
+                    .replace('MM', pad(d.getUTCMonth() + 1))
+                    .replace('yyyy', d.getUTCFullYear())
+                    .replace('HH', pad(d.getUTCHours()))
+                    .replace('hh', pad(d.getUTCHours() % 12 || 12))
+                    .replace('mm', pad(d.getUTCMinutes()))
+                    .replace('ss', pad(d.getUTCSeconds()))
+                    .replace(' a z', '');
+            }
+        },
+        ContentService: {
+            MimeType: { JSON: 'application/json' },
+            createTextOutput: (t) => ({ setMimeType: () => ({ getContent: () => t }, { getContent: () => t }), getContent: () => t })
+        },
+        ScriptApp: {
+            getProjectTriggers: () => [],
+            newTrigger: () => ({
+                timeBased: () => ({ everyMinutes: () => ({ create: () => {} }) })
+            }),
+            deleteTrigger: () => {}
+        }
+    };
+    sandbox.globalThis = sandbox;
+
+    vm.createContext(sandbox);
+    vm.runInContext(source, sandbox, { filename: 'code.gs' });
+
+    return { sandbox, sheet, grid, flushes, fetches, properties };
+}
+
+/** Load a Node module with selected dependencies replaced. */
+function loadWithMocks(modulePath, mocks) {
+    const resolved = require.resolve(modulePath);
+    const Module = require('module');
+    const original = Module.prototype.require;
+    const mockKeys = Object.keys(mocks);
+
+    delete require.cache[resolved];
+    for (const key of mockKeys) {
+        try { delete require.cache[require.resolve(key, { paths: [path.dirname(resolved)] })]; } catch {}
+    }
+
+    Module.prototype.require = function patched(id) {
+        if (Object.prototype.hasOwnProperty.call(mocks, id)) return mocks[id];
+        return original.apply(this, arguments);
+    };
+    try {
+        return require(resolved);
+    } finally {
+        Module.prototype.require = original;
+        delete require.cache[resolved];
+    }
+}
+
+/**
+ * `{ skip: <reason> }` for node:test when the mirrored Apps Script is not on disk, or
+ * `{}` when it is. Spread into the test options so a fresh clone reports a skip rather
+ * than a failure.
+ */
+const skipIfNoAppsScript = () => (appsScriptAvailable()
+    ? {}
+    : { skip: 'google-sheet/code.gs is gitignored and not present in this checkout' });
+
+module.exports = { loadAppsScript, loadWithMocks, REPO, appsScriptAvailable, skipIfNoAppsScript };

@@ -2,8 +2,6 @@ const express = require('express');
 const router = express.Router();
 const { sendSuccessResponse, sendErrorResponse } = require('../../utils/responseHelper');
 const { matchLocationFromCallContext } = require('../../services/contextJobService');
-const emailNotificationService = require('../../services/emailNotificationService');
-const supabaseService = require('../../services/supabaseService');
 
 /**
  * POST /st-match-location
@@ -11,8 +9,13 @@ const supabaseService = require('../../services/supabaseService');
  * Pre-flight location check for the Adaptive escalation flow. Given raw call
  * context, resolves whether a CONFIDENT ServiceTrade location match exists —
  * WITHOUT creating a job. The GAS escalation loop calls this before placing the
- * first outbound dispatch call, so we never bother the on-call technician for an
- * address that would only fail job creation afterwards.
+ * first outbound dispatch call.
+ *
+ * An INACTIVE location is still a match. Deactivation is a ServiceTrade bookkeeping
+ * state, not a judgement about whether the emergency is real, so it does not block
+ * the dispatch call or the job — it is reported as `status: 'inactive'` and flagged
+ * to the technician, the outcome trail and the client email instead. Only 'none'
+ * (nothing to create a job against) stops the escalation.
  *
  * Uses the exact same matcher (matchLocationFromCallContext) that the post-call
  * job creation uses, so this verdict and the eventual create verdict can't drift.
@@ -27,12 +30,14 @@ const supabaseService = require('../../services/supabaseService');
  *
  * Always responds 200 with:
  *   { status: 'matched' | 'inactive' | 'none',
- *     matched: boolean,                 // true only when status==='matched'
- *     locationId, locationName,         // set for 'matched' and 'inactive'
- *     tier,                             // set for 'matched'
+ *     matched: boolean,                 // true for BOTH 'matched' and 'inactive' — a
+ *                                       // location was resolved and dispatch proceeds
+ *     locationId, locationName,         // set whenever a location resolved
+ *     locationStatus: 'active'|'inactive',
+ *     tier,                             // set whenever a location resolved
  *     inactiveLocationName,             // set for 'inactive' (the deactivated location's name)
- *     matchedAddress }                  // set for 'inactive' (constructed street/city/state/postal)
- * On 'inactive' the route also fires a best-effort job-fail email (non-blocking).
+ *     matchedAddress }                  // constructed street/city/state/postal
+ * The route sends no email on any verdict.
  */
 router.post('/st-match-location', async (req, res) => {
     try {
@@ -67,6 +72,7 @@ router.post('/st-match-location', async (req, res) => {
         console.log('st-match-location received', {
             payloadKeys: Object.keys(src),
             hasAgentId: Boolean(agent_id),
+            callId: call_id || null,
             fromNumber: from_number || null,
             hasServiceAddress: Boolean(service_address)
         });
@@ -87,57 +93,36 @@ router.post('/st-match-location', async (req, res) => {
             company_name
         });
 
-        const matched = outcome.status === 'matched';
-        const inactive = outcome.status === 'inactive_match';
+        const found = outcome.status === 'matched';
+        const inactive = found && outcome.locationStatus === 'inactive';
 
-        // Inactive-location hit: the address is a KNOWN-but-deactivated location.
-        // Never create a job / escalate — fire the job-fail email (gated by
-        // send_job_fail_email) so the client + internal CC are alerted. Fire-and-forget:
-        // this endpoint sits on the GAS escalation gate (called synchronously before the
-        // first dispatch call), so we must NOT block the verdict on Supabase/SendGrid.
-        // The detached promise handles its own errors and never rejects the request.
-        if (inactive) {
-            Promise.resolve()
-                .then(async () => {
-                    const rows = await supabaseService.getServiceTradeToken(agent_id);
-                    const settings = (rows && rows[0]) || {};
-                    await emailNotificationService.sendJobNotification({
-                        settings,
-                        outcome: 'job_not_created',
-                        details: {
-                            agentId: agent_id,
-                            callId: call_id || '',
-                            customerName: customer_name,
-                            callerPhone: from_number,
-                            serviceAddress: service_address,
-                            priority: 'Emergency',
-                            reasonCode: 'inactive_location',
-                            reasonLabel: 'Address Inactive in ServiceTrade',
-                            reasonMessage: `The service address matches a location marked INACTIVE in ServiceTrade${outcome.locationName ? ` ("${outcome.locationName}")` : ''}. No job or dispatch — manual follow-up required.`,
-                            topCandidates: []
-                        }
-                    });
-                })
-                .catch((e) => console.error('st-match-location: inactive job-fail email failed:', e.message || e));
-        }
+        // NOTE: this route sends NO email, on any verdict.
+        //
+        // It used to fire a job-fail email on an inactive hit, which made it a second
+        // entry point into the notification service. GAS notifies
+        // POST /st-escalation-complete when the row reaches a terminal state, and the
+        // escalation email has exactly one trigger — escalation_complete = true — and
+        // exactly one sender. This endpoint's only job is the verdict.
 
-        const status = matched ? 'matched' : (inactive ? 'inactive' : 'none');
+        const status = inactive ? 'inactive' : (found ? 'matched' : 'none');
         return sendSuccessResponse(
             res,
             {
                 status,
-                matched,
-                locationId: (matched || inactive) ? (outcome.locationId || null) : null,
-                locationName: (matched || inactive) ? (outcome.locationName || null) : null,
-                tier: matched ? outcome.tier : null,
+                // `matched` means "a location was resolved and dispatch should proceed".
+                // An inactive location resolves and dispatches, so it is true here too —
+                // the distinction lives in `status` / `locationStatus`.
+                matched: found,
+                locationId: found ? (outcome.locationId || null) : null,
+                locationName: found ? (outcome.locationName || null) : null,
+                locationStatus: found ? (outcome.locationStatus || 'active') : null,
+                tier: found ? outcome.tier : null,
                 inactiveLocationName: inactive ? (outcome.locationName || null) : null,
-                matchedAddress: inactive ? (outcome.matchedAddress || null) : null
+                matchedAddress: found ? (outcome.matchedAddress || null) : null
             },
-            matched
-                ? 'Confident location match found'
-                : (inactive
-                    ? 'Address matches an INACTIVE ServiceTrade location — job/dispatch blocked'
-                    : 'No confident location match'),
+            inactive
+                ? 'Matches an INACTIVE ServiceTrade location — dispatch proceeds, flagged for office review'
+                : (found ? 'Confident location match found' : 'No confident location match'),
             200
         );
     } catch (error) {
