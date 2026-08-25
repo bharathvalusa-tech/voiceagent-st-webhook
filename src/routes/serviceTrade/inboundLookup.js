@@ -44,8 +44,28 @@ const emptyVars = (reason) => ({
     st_location_serviceable: 'false',
     st_location_id: '',
     st_location_name: '',
-    st_location_address: ''
+    st_location_address: '',
+    // The address the agent SPEAKS back when the caller's number identified their site,
+    // as street, city, state, postal code. Empty means we could not identify it, and
+    // empty is the only "no" — there is deliberately no sentinel word to check for,
+    // because the outcome trail already records whether an address was found.
+    //
+    // Empty is safe to leave in a prompt: Retell treats "" as a real value and renders
+    // nothing. An ABSENT variable is what renders as a literal {{mustache}}, which is why
+    // this belongs in emptyVars and not only on the success path.
+    address_match: ''
 });
+
+// Street, city, state, postal code — the four parts the agent reads aloud. Blank parts
+// are dropped rather than producing a trailing comma; four of the 395 mirrored Adaptive
+// locations carry no postal code.
+const formatSpokenAddress = (address) => {
+    const a = address || {};
+    return [a.street, a.city, a.state, a.postalCode]
+        .map((part) => String(part || '').trim())
+        .filter(Boolean)
+        .join(', ');
+};
 
 const respond = (res, dynamicVariables) => res.status(200).json({
     call_inbound: { dynamic_variables: dynamicVariables }
@@ -135,7 +155,11 @@ router.post('/st-inbound-lookup', async (req, res) => {
         }
 
         const status = result.locationStatus || 'active';
-        console.log(`[st-inbound-lookup] ${fromNumber} → location ${result.locationId} "${result.locationName}" (${status}, via ${result.source})`);
+        // Rebuild from the address parts rather than reusing matchedAddress, so the four
+        // components are in the order the agent speaks them and nothing else can creep in.
+        // Falls back to matchedAddress if a location somehow carries no parsed address.
+        const spokenAddress = formatSpokenAddress(result.address) || (result.matchedAddress || '');
+        console.log(`[st-inbound-lookup] ${fromNumber} → location ${result.locationId} "${result.locationName}" (${status}, via ${result.source}), speaking "${spokenAddress}"`);
 
         return respond(res, {
             st_lookup_ok: 'true',
@@ -147,7 +171,8 @@ router.post('/st-inbound-lookup', async (req, res) => {
             st_location_serviceable: status === 'active' ? 'true' : 'false',
             st_location_id: String(result.locationId || ''),
             st_location_name: result.locationName || '',
-            st_location_address: result.matchedAddress || ''
+            st_location_address: result.matchedAddress || '',
+            address_match: spokenAddress
         });
     } catch (error) {
         console.error(`[st-inbound-lookup] failing open for ${fromNumber}: ${error.message || error}`);
