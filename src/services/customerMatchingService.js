@@ -556,8 +556,8 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
         // searchByPhone consults the location index only when contact search came back
         // empty, so a number found on ONE contact looks unique even while the same
         // number is the main line of two other locations. Live example on this account:
-        // 416-755-9518 is on a contact at "Greenwin(2223 Eglinton Ave. E)" and on the
-        // main line of two further Greenwin sites — three candidates, one of which the
+        // 416-555-0118 is on a contact at "Northvale(500 Ridgeway Ave. E)" and on the
+        // main line of two further Northvale sites — three candidates, one of which the
         // contact path would have settled on alone. The address search used to be able
         // to correct that; a short-circuit cannot, so it must not fire.
         let indexLocationIds = [];
@@ -593,18 +593,30 @@ const findCustomerWithConfidence = async (authToken, searchData) => {
                     phoneExact: true
                 }));
 
-            logMatchEvent('phone_first_settled_match', {
+            // The union can name a location that only the INDEX knew about, leaving no
+            // contact candidate to settle on. Reachable when the index lookup inside
+            // searchByPhone throws and is caught, then lookupAllByPhone succeeds. Fall
+            // through to the full search rather than indexing into an empty array.
+            if (settled.length > 0) {
+                logMatchEvent('phone_first_settled_match', {
+                    phone: searchData.phone,
+                    locationId: phoneLocationIds[0],
+                    locationName: settled[0].locationName,
+                    locationStatus: settled[0].locationStatus,
+                    candidateCount: settled.length,
+                    // Recorded so a settled match is auditable: both the contact graph
+                    // and the location index pointed at this one location, nothing else.
+                    corroboratedBy: ['contact_search', 'location_phone_index'],
+                    skippedSearches: ['name', 'location_name', 'address', 'company_name']
+                });
+                return settled;
+            }
+
+            logMatchEvent('phone_first_no_candidate_to_settle', {
                 phone: searchData.phone,
                 locationId: phoneLocationIds[0],
-                locationName: settled[0].locationName,
-                locationStatus: settled[0].locationStatus,
-                candidateCount: settled.length,
-                // Recorded so a settled match is auditable: both the contact graph and
-                // the location index pointed at this one location and nothing else.
-                corroboratedBy: ['contact_search', 'location_phone_index'],
-                skippedSearches: ['name', 'location_name', 'address', 'company_name']
+                reason: 'location_known_only_to_the_index'
             });
-            return settled;
         }
 
         logMatchEvent('phone_first_not_settled', {

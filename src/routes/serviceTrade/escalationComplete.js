@@ -193,9 +193,25 @@ router.post('/st-escalation-complete', async (req, res) => {
         // out, so a later retry should be allowed to try again.
         if (callId && result && result.sent) emailedCalls.set(callId, Date.now());
 
+        // Report WHETHER it sent, never to whom. `result` carries the resolved `to` and
+        // `cc` arrays, and this response goes back over the wire to the Apps Script,
+        // which never reads them — so returning them only put client email addresses
+        // somewhere they did not need to be.
         return sendSuccessResponse(
             res,
-            { status: 'ok', call_id: callId, email: result },
+            {
+                status: 'ok',
+                call_id: callId,
+                email: {
+                    sent: Boolean(result && result.sent),
+                    skipped: Boolean(result && result.skipped),
+                    reason: (result && result.reason) || null,
+                    recipient_count: (result && Array.isArray(result.to)) ? result.to.length : 0,
+                    cc_count: (result && Array.isArray(result.cc)) ? result.cc.length : 0,
+                    subject: (result && result.subject) || null,
+                    jobLink: (result && result.jobLink) || null
+                }
+            },
             'Escalation complete processed',
             200
         );

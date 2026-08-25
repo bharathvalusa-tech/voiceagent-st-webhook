@@ -12,8 +12,17 @@ const REPO = path.join(__dirname, '..');
  * SpreadsheetApp / UrlFetchApp / PropertiesService / LockService objects and asserting
  * on what it wrote and what it called.
  */
+// google-sheet/code.gs is GITIGNORED — it is the deployed Apps Script, mirrored here but
+// never committed. So it is simply absent on a fresh clone and in CI, and reading it
+// unconditionally turned every Apps Script test into an ENOENT crash.
+const APPS_SCRIPT_PATH = path.join(REPO, 'google-sheet', 'code.gs');
+const appsScriptAvailable = () => fs.existsSync(APPS_SCRIPT_PATH);
+
 function loadAppsScript({ rows = [], fetchHandler, properties = {}, config = {} } = {}) {
-    let source = fs.readFileSync(path.join(REPO, 'google-sheet', 'code.gs'), 'utf8');
+    if (!appsScriptAvailable()) {
+        throw new Error(`google-sheet/code.gs not found — guard the test with skipIfNoAppsScript()`);
+    }
+    let source = fs.readFileSync(APPS_SCRIPT_PATH, 'utf8');
 
     // CONFIG is a top-level `const`, so it is a lexical binding inside the vm context
     // and never appears on the sandbox object — a test cannot reach in and set a value.
@@ -169,4 +178,13 @@ function loadWithMocks(modulePath, mocks) {
     }
 }
 
-module.exports = { loadAppsScript, loadWithMocks, REPO };
+/**
+ * `{ skip: <reason> }` for node:test when the mirrored Apps Script is not on disk, or
+ * `{}` when it is. Spread into the test options so a fresh clone reports a skip rather
+ * than a failure.
+ */
+const skipIfNoAppsScript = () => (appsScriptAvailable()
+    ? {}
+    : { skip: 'google-sheet/code.gs is gitignored and not present in this checkout' });
+
+module.exports = { loadAppsScript, loadWithMocks, REPO, appsScriptAvailable, skipIfNoAppsScript };

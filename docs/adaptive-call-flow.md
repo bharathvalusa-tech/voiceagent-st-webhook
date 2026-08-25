@@ -293,7 +293,7 @@ outbound_call_id, is_job_created, job_number, outcome, terminal }`. GAS:
 - **WS-3 upsert** collapses sequential re-deliveries of the same inbound `call_id`
   into one row; **WS-4** stops our own outbound calls from ever inserting a row.
 
-## 7. Column-population lifecycle (`Sheet1`, A–AC)
+## 7. Column-population lifecycle (`Sheet1`, A–AD)
 
 | Col | Field | Owner | When written |
 |-----|-------|-------|--------------|

@@ -184,22 +184,22 @@ test('an ambiguous phone does NOT settle and falls through to the other searches
 });
 
 test('a contact-unique phone does NOT settle when other locations share the line', async () => {
-    // The live case that caught this: 416-755-9518 is on a contact at
-    // "Greenwin(2223 Eglinton Ave. E)" and is ALSO the main line of two further Greenwin
+    // The live case that caught this: 416-555-0118 is on a contact at
+    // "Northvale(500 Ridgeway Ave. E)" and is ALSO the main line of two further Northvale
     // sites. Contact search alone sees one location and looks unique. searchByPhone only
     // consults the location index when contact search comes back empty, so without an
     // explicit corroboration step the short-circuit would settle on the contact's site
     // and skip the address search that used to correct it.
     const { svc, calls } = phoneFirstMatcher({
-        contacts: [contactOn([518647497086337], '(416) 755-9518')],
+        contacts: [contactOn([518647497086337], '(416) 555-0118')],
         indexHits: [
-            { locationId: 782066335447681, locationName: 'Greenwin(104 Bidewell)', locationStatus: 'active', address: {} },
-            { locationId: 769495202794625, locationName: 'Greenwin(2225 Eglinton)', locationStatus: 'inactive', address: {} }
+            { locationId: 782066335447681, locationName: 'Northvale(104 Sunhaven)', locationStatus: 'active', address: {} },
+            { locationId: 769495202794625, locationName: 'Northvale(502 Ridgeway)', locationStatus: 'inactive', address: {} }
         ]
     });
 
     const candidates = await svc.findCustomerWithConfidence('tok', {
-        phone: '+14167559518',
+        phone: '+14165550118',
         address: '2223 Eglinton Ave. E'
     });
 
@@ -277,18 +277,18 @@ const matcherWith = (candidates) => loadWithMocks(
 
 const candidate = (over = {}) => ({
     tier: 1, locationId: 6398701, locationName: '2213256 Ontario Ltd.', locationStatus: 'active',
-    address: { street: '71 Todd Rd.', city: 'Georgetown', state: 'ON', postalCode: 'L7G 4R8' },
+    address: { street: '9 Elmcrest Rd.', city: 'Georgetown', state: 'ON', postalCode: 'L7G 4R8' },
     ...over
 });
 
 test('an inactive location now MATCHES instead of being excluded', async () => {
     const svc = matcherWith([candidate({ locationStatus: 'inactive' })]);
-    const result = await svc.matchLocationFromCallContext({ agent_id: OUTBOUND_AGENT, service_address: '71 Todd Rd.' });
+    const result = await svc.matchLocationFromCallContext({ agent_id: OUTBOUND_AGENT, service_address: '9 Elmcrest Rd.' });
 
     assert.strictEqual(result.status, 'matched');
     assert.strictEqual(result.locationStatus, 'inactive');
     assert.strictEqual(result.locationId, 6398701);
-    assert.strictEqual(result.matchedAddress, '71 Todd Rd., Georgetown, ON, L7G 4R8');
+    assert.strictEqual(result.matchedAddress, '9 Elmcrest Rd., Georgetown, ON, L7G 4R8');
 });
 
 test('an active location still wins over an inactive one', async () => {
@@ -305,7 +305,7 @@ test('an active location still wins over an inactive one', async () => {
 test('a job IS created on an inactive location, and tagged in ServiceTrade', async () => {
     const svc = matcherWith([candidate({ locationStatus: 'inactive' })]);
     const result = await svc.createJobFromCallContext({
-        agent_id: OUTBOUND_AGENT, service_address: '71 Todd Rd.',
+        agent_id: OUTBOUND_AGENT, service_address: '9 Elmcrest Rd.',
         customer_name: 'Carlo', call_summary: 'no heat'
     });
 
@@ -349,7 +349,7 @@ const composeWith = (details, outcome = 'job_created') => {
 
 const baseDetails = {
     customerName: 'Carlo Henry', callerPhone: '+14169012663',
-    serviceAddress: '71 Todd Rd., Georgetown, ON', callSummary: 'No heat',
+    serviceAddress: '9 Elmcrest Rd., Georgetown, ON', callSummary: 'No heat',
     priority: 'Emergency', timestamp: Date.now(), jobNumber: '49942168'
 };
 
@@ -415,7 +415,7 @@ test('inbound lookup returns Retell-shaped dynamic variables for an inactive loc
             normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
             lookupByPhone: async () => ({
                 locationId: 6398701, locationName: '2213256 Ontario Ltd.',
-                locationStatus: 'inactive', matchedAddress: '71 Todd Rd., Georgetown, ON, L7G 4R8'
+                locationStatus: 'inactive', matchedAddress: '9 Elmcrest Rd., Georgetown, ON, L7G 4R8'
             })
         },
         '../../services/serviceTradeService': { searchContacts: async () => [] }
@@ -429,7 +429,7 @@ test('inbound lookup returns Retell-shaped dynamic variables for an inactive loc
         assert.strictEqual(v.st_location_status, 'inactive');
         assert.strictEqual(v.st_location_serviceable, 'false');
         assert.strictEqual(v.st_location_id, '6398701');
-        assert.strictEqual(v.st_location_address, '71 Todd Rd., Georgetown, ON, L7G 4R8');
+        assert.strictEqual(v.st_location_address, '9 Elmcrest Rd., Georgetown, ON, L7G 4R8');
     } finally { app.close(); }
 });
 
@@ -485,9 +485,9 @@ test('a resolved caller gets the four spoken address parts, in order', async () 
             normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
             lookupByPhone: async () => ({
                 locationId: 6398685,
-                locationName: 'Residence(57 Admiral Rd.)',
+                locationName: 'Residence(31 Larkspur Rd.)',
                 locationStatus: 'active',
-                address: { street: '57 Admiral Road', city: 'Toronto', state: 'ON', postalCode: 'M5R 2L4' },
+                address: { street: '31 Larkspur Road', city: 'Toronto', state: 'ON', postalCode: 'M5R 2L4' },
                 matchedAddress: 'ignored — rebuilt from the parts'
             })
         },
@@ -496,7 +496,7 @@ test('a resolved caller gets the four spoken address parts, in order', async () 
     try {
         const body = await callInbound(app.port, INBOUND_AGENT, '+14169012663');
         const v = body.call_inbound.dynamic_variables;
-        assert.strictEqual(v.address_match, '57 Admiral Road, Toronto, ON, M5R 2L4');
+        assert.strictEqual(v.address_match, '31 Larkspur Road, Toronto, ON, M5R 2L4');
     } finally { app.close(); }
 });
 
@@ -510,7 +510,7 @@ test('a blank address part is skipped rather than leaving a stray comma', async 
                 locationId: 1,
                 locationName: 'No postal on file',
                 locationStatus: 'active',
-                address: { street: '123 Omni Drive', city: 'Toronto', state: 'ON', postalCode: '' },
+                address: { street: '77 Sandpiper Drive', city: 'Toronto', state: 'ON', postalCode: '' },
                 matchedAddress: ''
             })
         },
@@ -518,7 +518,7 @@ test('a blank address part is skipped rather than leaving a stray comma', async 
     });
     try {
         const body = await callInbound(app.port, INBOUND_AGENT, '+14169012663');
-        assert.strictEqual(body.call_inbound.dynamic_variables.address_match, '123 Omni Drive, Toronto, ON');
+        assert.strictEqual(body.call_inbound.dynamic_variables.address_match, '77 Sandpiper Drive, Toronto, ON');
     } finally { app.close(); }
 });
 
@@ -596,6 +596,47 @@ test('a repeated escalation-complete does not send a second client email', async
         assert.strictEqual(second.data.status, 'duplicate');
         assert.strictEqual(sends.length, 1, `expected 1 send, got ${sends.length}`);
         assert.strictEqual(sends[0].details.locationStatus, 'inactive');
+    } finally { server.close(); }
+});
+
+test('the escalation-complete response reports counts, never addresses', async () => {
+    // The response goes back to the Apps Script, which never reads the recipients — so
+    // returning them only put client email addresses somewhere they did not need to be.
+    const router = loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/escalationComplete'), {
+        '../../services/supabaseService': { getServiceTradeToken: async () => [{ Name: 'Adaptive' }] },
+        '../../services/emailNotificationService': {
+            sendJobNotification: async () => ({
+                sent: true,
+                to: ['client@example.com'],
+                cc: ['office@example.com'],
+                subject: 'Service Request',
+                jobLink: null
+            })
+        }
+    });
+    const express = require('express');
+    const app = express();
+    app.use(express.json());
+    app.use('/', router);
+    const server = app.listen(0);
+    await new Promise((r) => server.once('listening', r));
+    const port = server.address().port;
+
+    try {
+        const body = await fetch(`http://127.0.0.1:${port}/st-escalation-complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                agent_id: OUTBOUND_AGENT, inbound_call_id: 'call_no_leak_1',
+                reason: 'created', is_job_created: true
+            })
+        }).then((r) => r.json());
+
+        const serialized = JSON.stringify(body);
+        assert.ok(!serialized.includes('@'), `no address may appear anywhere: ${serialized}`);
+        assert.strictEqual(body.data.email.sent, true);
+        assert.strictEqual(body.data.email.recipient_count, 1);
+        assert.strictEqual(body.data.email.cc_count, 1);
     } finally { server.close(); }
 });
 

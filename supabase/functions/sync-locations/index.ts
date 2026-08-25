@@ -342,7 +342,18 @@ async function syncCompanies(
     if (upsertError) throw new Error(`company upsert failed: ${upsertError.message}`);
   }
 
-  return { fetched: fetched.length, upserted: rows.length, gap_filled: gapFilled, updated_after: since };
+  // Every company id now on file for this tenant — stored already plus what we just
+  // wrote. The location pass filters against this so a missing reference drops one row
+  // instead of failing the batch.
+  const storedIds = new Set<number>([...stored, ...rows.map((r) => r.servicetrade_id)]);
+
+  return {
+    fetched: fetched.length,
+    upserted: rows.length,
+    gap_filled: gapFilled,
+    updated_after: since,
+    storedIds
+  };
 }
 
 async function syncTenant(db: SupabaseClient, tenant: Tenant, full: boolean) {
@@ -355,7 +366,23 @@ async function syncTenant(db: SupabaseClient, tenant: Tenant, full: boolean) {
 
   const companies = await syncCompanies(db, tenant, authToken, locations, full);
 
-  const rows = locations.filter((l) => l?.id).map((l) => locationRow(l, tenant));
+  // Drop locations whose company is still not on file, rather than letting one bad
+  // reference take the batch down. servicetrade_company_id has a foreign key to
+  // servicetrade_companies, and the upsert is one statement — so a single unresolvable
+  // company would fail all 394 rows with it. The count is reported, never swallowed:
+  // silent truncation reads as a clean sync.
+  const knownCompanyIds = companies.storedIds;
+  const allRows = locations.filter((l) => l?.id).map((l) => locationRow(l, tenant));
+  const rows = allRows.filter((r) => r.servicetrade_company_id === null
+    || knownCompanyIds.has(r.servicetrade_company_id));
+  const droppedForCompany = allRows
+    .filter((r) => !rows.includes(r))
+    .map((r) => r.servicetrade_id);
+
+  if (droppedForCompany.length > 0) {
+    console.error(`[sync-locations] ${tenant.agentId}: dropping ${droppedForCompany.length} location(s) whose company is not on file — ${JSON.stringify(droppedForCompany.slice(0, 10))}`);
+  }
+
   if (rows.length > 0) {
     const { error } = await db
       .from('servicetrade_locations')
@@ -387,7 +414,14 @@ async function syncTenant(db: SupabaseClient, tenant: Tenant, full: boolean) {
     updated_after: since,
     fetched: locations.length,
     upserted: rows.length,
-    companies,
+    dropped_missing_company: droppedForCompany.length,
+    dropped_ids: droppedForCompany.slice(0, 25),
+    companies: {
+      fetched: companies.fetched,
+      upserted: companies.upserted,
+      gap_filled: companies.gap_filled,
+      updated_after: companies.updated_after
+    },
     missing_from_api: missingIds.length,
     missing_ids: missingIds.slice(0, 25),
     duration_ms: Date.now() - started

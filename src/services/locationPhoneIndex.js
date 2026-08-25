@@ -27,8 +27,29 @@ const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 // Last ten digits, extensions stripped first. See src/utils/phone.js.
 const { normalizePhone } = require('../utils/phone');
 
-// One entry per ServiceTrade account (keyed by agent id, which owns the token).
+// One entry per ServiceTrade account, keyed by the auth token.
+//
+// The token ROTATES, so a long-lived process would otherwise accumulate one dead entry
+// per rotation, each holding a full location index. Bounded on Vercel because instances
+// are short-lived; unbounded anywhere else. Stale entries are dropped on every write and
+// the map is capped.
 const caches = new Map();
+const MAX_CACHED_ACCOUNTS = 8;
+
+const pruneCaches = () => {
+    const now = Date.now();
+    for (const [key, entry] of caches) {
+        const ttl = entry.source === 'mirror' ? FALLBACK_CACHE_TTL_MS : CACHE_TTL_MS;
+        if (now - entry.builtAt >= ttl) caches.delete(key);
+    }
+    // Still too many live entries: drop the oldest first.
+    if (caches.size > MAX_CACHED_ACCOUNTS) {
+        [...caches.entries()]
+            .sort((a, b) => a[1].builtAt - b[1].builtAt)
+            .slice(0, caches.size - MAX_CACHED_ACCOUNTS)
+            .forEach(([key]) => caches.delete(key));
+    }
+};
 
 const formatAddress = (address) => {
     const a = address || {};
@@ -140,6 +161,7 @@ async function getIndex(authToken, cacheKey, stAgentId) {
         const started = Date.now();
         const locations = await serviceTradeService.getAllLocations(authToken);
         const index = buildIndex(locations);
+        pruneCaches();
         caches.set(key, { index, builtAt: Date.now(), source: 'api' });
         console.log(`[location-phone-index] built for ${key}: ${locations.length} locations, ${index.size} distinct numbers, ${Date.now() - started}ms`);
         return index;
@@ -153,6 +175,7 @@ async function getIndex(authToken, cacheKey, stAgentId) {
         try {
             const mirrored = await buildIndexFromMirror(stAgentId);
             if (mirrored) {
+                pruneCaches();
                 caches.set(key, { index: mirrored.index, builtAt: Date.now(), source: 'mirror' });
                 // Loud on purpose: a match resolved from the mirror must be
                 // distinguishable in the logs from one resolved live, because the

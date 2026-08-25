@@ -19,8 +19,8 @@ const { matchSpokenAddress } = require('../../services/addressMatchService');
  * endpoint (docs/session.md §9).
  *
  * Accepts either a whole address or the three re-ask components:
- *   { address: "125 Corcoran Court, East Gwillimbury, ON" }
- *   { street: "125 Corcoran Court", city: "East Gwillimbury", state: "ON", postal_code: "L9N 0M8" }
+ *   { address: "150 Thornbury Court, East Gwillimbury, ON" }
+ *   { street: "150 Thornbury Court", city: "East Gwillimbury", state: "ON", postal_code: "L9N 0M8" }
  *
  * ALWAYS answers 200 with a spoken-language `message` the agent can act on. A tool that
  * errors mid-call leaves Clara with nothing to say, so failure is reported as "no match"

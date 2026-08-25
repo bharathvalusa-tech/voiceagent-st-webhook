@@ -59,7 +59,8 @@ dead. Every dependency is public and the lockfile already resolves to npmjs.
 
 - `npm run build:syntax` — parses every file under `src/`.
 - `npm run build:smoke` — boots the server. Passes.
-- `npm test` — 42 tests in `tests/`, `node --test`, no network. Apps Script functions are
+- `npm test` — the suite in `tests/`, `node --test`, no network. Apps Script tests skip
+  automatically when the gitignored `google-sheet/code.gs` is absent. Apps Script functions are
   evaluated in a `vm` with `SpreadsheetApp`, `UrlFetchApp`, `PropertiesService`,
   `LockService` and `Utilities` stubbed (`tests/harness.js`); Node modules are loaded with
   their dependencies swapped by `loadWithMocks`.

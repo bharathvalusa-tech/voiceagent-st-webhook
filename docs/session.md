@@ -181,7 +181,8 @@ Node side first, or notifies 404 and the backstop retries them.
   `PropertiesService`.
 - Repair the duplicated `outcome` cells on rows 375, 377, 384 and 390 by hand.
 - ~~The verification harnesses were written to a session scratchpad~~ — **done.** They live
-  in `tests/` (58 tests, `node --test`, no network).
+  in `tests/` (`node --test`, no network). Run `npm test` for the current count —
+  pinning a number here only makes the doc wrong on the next commit.
 - ~~`caller_details` and `location_extract` describe an `st_customer` function~~ —
   **done.** Zero `st_customer` references remain in any of the three agent configs.
 
@@ -191,7 +192,7 @@ Node side first, or notifies 404 and the backstop retries them.
   `~/.npmrc` pointing npm at an AWS CodeArtifact registry with a dead token. Every dependency is
   public and `package-lock.json` resolves all 266 to `registry.npmjs.org`, so
   `npm ci --registry=https://registry.npmjs.org` installs cleanly. `npm run build:smoke` now runs
-  and passes, and there is a real suite: `npm test` (42 tests).
+  and passes, and there is a real suite: `npm test`.
 - ~~**`.env.local` is not loaded.**~~ — **fixed 2026-08-14.** `src/config/environment.js` and
   `src/config/database.js` now load `.env.local` before `.env`. dotenv never overwrites an
   already-set variable, so both calls are no-ops on Vercel.
@@ -386,8 +387,8 @@ name/address/company searches entirely.
 **It corroborates against BOTH sources first, and this is load-bearing.** `searchByPhone`
 consults the location index only when contact search comes back empty, so a number on one
 *contact* looks unique while the same number is two other locations' *main line*. Live
-example: `416-755-9518` is on a contact at `Greenwin(2223 Eglinton Ave. E)` and on the
-main line of two further Greenwin sites — three candidate locations, one of which the
+example: `416-555-0118` is on a contact at `Northvale(500 Ridgeway Ave. E)` and on the
+main line of two further Northvale sites — three candidate locations, one of which the
 contact path would have settled on alone. The address search used to be able to correct
 that; a short-circuit cannot. So `lookupAllByPhone` (ambiguity included, unlike
 `lookupByPhone`) is consulted and the union must be exactly one. An index failure defers

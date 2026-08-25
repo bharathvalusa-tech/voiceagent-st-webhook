@@ -70,8 +70,8 @@ const config = {
     ]),
     // INBOUND agent ids allowed to call POST /st-inbound-lookup (Retell's per-phone-number
     // inbound webhook). Same scoping reason as above: the route resolves against one
-    // tenant's ServiceTrade account. Defaults to the two Adaptive inbound agents.
-    // Adaptive main router, office-hours and after-hours agents.
+    // tenant's ServiceTrade account. Defaults to the three Adaptive inbound agents:
+    // main router, office hours and after hours.
     inboundLookupAgentIds: parseIdList(process.env.INBOUND_LOOKUP_AGENT_IDS, [
         'agent_b2c640200a45d2f4b7d8ad8d28',
         'agent_052cc725604f449c8725ef2718',

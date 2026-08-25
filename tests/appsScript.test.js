@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { loadAppsScript } = require('./harness');
+const { loadAppsScript, skipIfNoAppsScript } = require('./harness');
 
 // Column indices mirror the COLUMNS map in google-sheet/code.gs.
 const C = {
@@ -44,7 +44,7 @@ const router = (matchStatus, opts = {}) => (url) => {
                     locationId: matchStatus === 'none' ? null : 6398701,
                     locationName: matchStatus === 'none' ? null : '2213256 Ontario Ltd.',
                     locationStatus: matchStatus === 'inactive' ? 'inactive' : 'active',
-                    matchedAddress: '71 Todd Rd., Georgetown, ON, L7G 4R8'
+                    matchedAddress: '9 Elmcrest Rd., Georgetown, ON, L7G 4R8'
                 }
             })
         };
@@ -60,7 +60,7 @@ const dispatchVars = (fetches) => {
     return call ? JSON.parse(call.options.payload).retell_llm_dynamic_variables : null;
 };
 
-test('inactive location DISPATCHES instead of ending the escalation', () => {
+test('inactive location DISPATCHES instead of ending the escalation', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('inactive') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -78,7 +78,7 @@ test('inactive location DISPATCHES instead of ending the escalation', () => {
     );
 });
 
-test('inactive location puts inactive_address=true and a spoken note on the dispatch call', () => {
+test('inactive location puts inactive_address=true and a spoken note on the dispatch call', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('inactive') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -89,7 +89,7 @@ test('inactive location puts inactive_address=true and a spoken note on the disp
     assert.match(vars.location_status_note, /still log the job/);
 });
 
-test('active location sends inactive_address=false and an empty note', () => {
+test('active location sends inactive_address=false and an empty note', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -103,7 +103,7 @@ test('active location sends inactive_address=false and an empty note', () => {
 // no call", which meant nobody was ever dialled about the emergency — the office got an
 // email and the caller got nothing. An address that is not on file is a bookkeeping gap,
 // not evidence the emergency is fake, so the technician is dialled, told, and decides.
-test('an unmatched address DISPATCHES instead of ending the escalation', () => {
+test('an unmatched address DISPATCHES instead of ending the escalation', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('none') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -119,7 +119,7 @@ test('an unmatched address DISPATCHES instead of ending the escalation', () => {
         'no client email while the chain is still live');
 });
 
-test('an unmatched address puts unmatched_address=true and a spoken note on the dispatch call', () => {
+test('an unmatched address puts unmatched_address=true and a spoken note on the dispatch call', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('none') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -129,7 +129,7 @@ test('an unmatched address puts unmatched_address=true and a spoken note on the 
     assert.match(vars.location_status_note, /not on file in ServiceTrade/);
 });
 
-test('an active location sends unmatched_address=false', () => {
+test('an active location sends unmatched_address=false', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -146,7 +146,7 @@ const techMail = (env) => {
     return call ? JSON.parse(call.options.payload) : null;
 };
 
-test('TEST_NOTIFICATION_EMAIL alone redirects the technician email', () => {
+test('TEST_NOTIFICATION_EMAIL alone redirects the technician email', skipIfNoAppsScript(), () => {
     // Set on its own, with no test callers configured, it diverts EVERY row. This is the
     // testing mode: you receive what the on-call technician would have received.
     const env = loadAppsScript({
@@ -165,7 +165,7 @@ test('TEST_NOTIFICATION_EMAIL alone redirects the technician email', () => {
         'a diverted REAL row must be unmistakable in the inbox');
 });
 
-test('with no test inbox set, the real technician is emailed and CC applies', () => {
+test('with no test inbox set, the real technician is emailed and CC applies', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow()],
         fetchHandler: router('matched'),
@@ -180,7 +180,7 @@ test('with no test inbox set, the real technician is emailed and CC applies', ()
     assert.ok(!/REDIRECTED/.test(mail.subject));
 });
 
-test('a test number with no inbox configured sends nothing at all', () => {
+test('a test number with no inbox configured sends nothing at all', skipIfNoAppsScript(), () => {
     // Fails closed on purpose: falling back to the real technician would page them for
     // what the tester meant to keep to themselves.
     const env = loadAppsScript({
@@ -189,7 +189,7 @@ test('a test number with no inbox configured sends nothing at all', () => {
         config: { TEST_NOTIFICATION_EMAIL: '', TEST_OVERRIDE_NUMBERS: ['+14169012663'] }
     });
     const sent = env.sandbox.sendTechnicianEmergencyEmail(
-        'realtech@adaptiveclimates.com', 'Real Tech', 'Carlo', '71 Todd Rd',
+        'realtech@adaptiveclimates.com', 'Real Tech', 'Carlo', '9 Elmcrest Rd',
         '+14169012663', 'No heat', 'transcript', 'call_1', new Date().toISOString(), 'active'
     );
 
@@ -197,7 +197,7 @@ test('a test number with no inbox configured sends nothing at all', () => {
     assert.ok(!env.fetches.some((f) => f.url.includes('sendgrid')), 'no email leaves the building');
 });
 
-test('one knob does everything: call routing, both emails, and the row tag', () => {
+test('one knob does everything: call routing, both emails, and the row tag', skipIfNoAppsScript(), () => {
     // TEST_OVERRIDE_NUMBERS is the single switch. A call from a listed number must dial
     // that number back, tag the row, and divert both emails — with nothing else set.
     const env = loadAppsScript({
@@ -227,7 +227,7 @@ test('one knob does everything: call routing, both emails, and the row tag', () 
     assert.strictEqual(JSON.parse(notify.options.payload).test_email, 'tester@example.com');
 });
 
-test('a real row carries no test_email, so the client email is untouched', () => {
+test('a real row carries no test_email, so the client email is untouched', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow()],
         fetchHandler: router('matched'),
@@ -239,7 +239,7 @@ test('a real row carries no test_email, so the client email is untouched', () =>
     assert.strictEqual(JSON.parse(notify.options.payload).test_email, '');
 });
 
-test('a test row with no inbox sends NO client email at all', () => {
+test('a test row with no inbox sends NO client email at all', skipIfNoAppsScript(), () => {
     // Fails closed. Emailing the real client about a test emergency is the worst outcome.
     const env = loadAppsScript({
         rows: [emergencyRow()],
@@ -252,7 +252,7 @@ test('a test row with no inbox sends NO client email at all', () => {
         'the endpoint is never called, so the real client cannot be emailed');
 });
 
-test('the technician email is subject-flagged when the address is not on file', () => {
+test('the technician email is subject-flagged when the address is not on file', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('none') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -261,7 +261,7 @@ test('the technician email is subject-flagged when the address is not on file', 
     assert.match(JSON.parse(mail.options.payload).subject, /\[ADDRESS NOT ON FILE\]/);
 });
 
-test('gate failure fails open, dials, and says so in the trail', () => {
+test('gate failure fails open, dials, and says so in the trail', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow()],
         fetchHandler: (url) => (url.includes('st-match-location')
@@ -275,7 +275,7 @@ test('gate failure fails open, dials, and says so in the trail', () => {
     assert.match(String(env.grid[0][C.OUTCOME]), /failed open/);
 });
 
-test('later ladder steps repeat the inactive note from column AD', () => {
+test('later ladder steps repeat the inactive note from column AD', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow({
             RESPONSE_CALL_ID_1: 'call_out_1',
@@ -298,14 +298,14 @@ test('later ladder steps repeat the inactive note from column AD', () => {
     assert.match(vars.location_status_note, /marked inactive in ServiceTrade/);
 });
 
-test('outcome lines carry a timestamp', () => {
+test('outcome lines carry a timestamp', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()] });
     env.sandbox.appendOutcome(env.sheet, 2, 'call1 - answered');
 
     assert.match(String(env.grid[0][C.OUTCOME]), /^\[\d{2}\/\d{2} \d{2}:\d{2}:\d{2}\] call1 - answered$/);
 });
 
-test('timestamps do not defeat exact-duplicate suppression', () => {
+test('timestamps do not defeat exact-duplicate suppression', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()] });
     env.sandbox.appendOutcome(env.sheet, 2, 'call1 - no job — tech declined');
     env.sandbox.appendOutcome(env.sheet, 2, 'call1 - no job — tech declined');
@@ -315,7 +315,7 @@ test('timestamps do not defeat exact-duplicate suppression', () => {
     assert.strictEqual(lines.length, 1, `expected 1 line, got ${lines.length}: ${JSON.stringify(lines)}`);
 });
 
-test('a genuinely different line is still appended', () => {
+test('a genuinely different line is still appended', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()] });
     env.sandbox.appendOutcome(env.sheet, 2, 'call1 - answered');
     env.sandbox.appendOutcome(env.sheet, 2, 'call1 - no job — tech declined');
@@ -323,14 +323,14 @@ test('a genuinely different line is still appended', () => {
     assert.strictEqual(String(env.grid[0][C.OUTCOME]).split('\n').length, 2);
 });
 
-test('an unstamped legacy line is not re-appended after stamping was added', () => {
+test('an unstamped legacy line is not re-appended after stamping was added', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow({ OUTCOME: 'call1 - answered' })] });
     env.sandbox.appendOutcome(env.sheet, 2, 'call1 - answered');
 
     assert.strictEqual(String(env.grid[0][C.OUTCOME]), 'call1 - answered');
 });
 
-test('handleJobUpdate creates the job on an inactive location and records the flag', () => {
+test('handleJobUpdate creates the job on an inactive location and records the flag', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow({ RESPONSE_CALL_ID_1: 'call_out_1', CALL_DECLINE_COUNTER: 1, LOCATION_STATUS: 'inactive' })],
         fetchHandler: router('inactive')
@@ -359,7 +359,7 @@ test('handleJobUpdate creates the job on an inactive location and records the fl
     assert.strictEqual(JSON.parse(notify.options.payload).location_status, 'inactive');
 });
 
-test('the post-call location status overrides the pre-flight verdict', () => {
+test('the post-call location status overrides the pre-flight verdict', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow({ RESPONSE_CALL_ID_1: 'call_out_1', CALL_DECLINE_COUNTER: 1, LOCATION_STATUS: 'active' })],
         fetchHandler: router('matched')
@@ -374,7 +374,7 @@ test('the post-call location status overrides the pre-flight verdict', () => {
     assert.strictEqual(env.grid[0][C.LOCATION_STATUS], 'inactive');
 });
 
-test('a blank location_status leaves column AD untouched', () => {
+test('a blank location_status leaves column AD untouched', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow({ RESPONSE_CALL_ID_1: 'call_out_1', CALL_DECLINE_COUNTER: 1, LOCATION_STATUS: 'inactive' })],
         fetchHandler: router('inactive')
@@ -388,7 +388,7 @@ test('a blank location_status leaves column AD untouched', () => {
     assert.strictEqual(env.grid[0][C.LOCATION_STATUS], 'inactive');
 });
 
-test('a repeated job_update is ignored and writes no second trail line', () => {
+test('a repeated job_update is ignored and writes no second trail line', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({
         rows: [emergencyRow({ RESPONSE_CALL_ID_1: 'call_out_1', CALL_DECLINE_COUNTER: 1 })],
         fetchHandler: router('matched')
@@ -408,7 +408,7 @@ test('a repeated job_update is ignored and writes no second trail line', () => {
     assert.strictEqual(created.length, 1, `expected 1 JOB CREATED line, got ${created.length}`);
 });
 
-test('voicemail keeps the chain alive; a decline ends it', () => {
+test('voicemail keeps the chain alive; a decline ends it', skipIfNoAppsScript(), () => {
     const mk = () => loadAppsScript({
         rows: [emergencyRow({ RESPONSE_CALL_ID_1: 'call_out_1', CALL_DECLINE_COUNTER: 1 })],
         fetchHandler: router('matched')
@@ -431,7 +431,7 @@ test('voicemail keeps the chain alive; a decline ends it', () => {
     assert.strictEqual(dec.grid[0][C.ESCALATION_COMPLETE], true, 'a decline must be terminal');
 });
 
-test('classifyCall treats every voicemail signal as no-answer', () => {
+test('classifyCall treats every voicemail signal as no-answer', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()] });
     const cases = [
         ['disconnection_reason=voicemail_reached', { call_status: 'ended', disconnection_reason: 'voicemail_reached' }],
@@ -449,7 +449,7 @@ test('classifyCall treats every voicemail signal as no-answer', () => {
     );
 });
 
-test('a blank service address is terminal before any dial', () => {
+test('a blank service address is terminal before any dial', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [], fetchHandler: router('matched') });
     env.sandbox.doPost({
         postData: {
@@ -469,7 +469,7 @@ test('a blank service address is terminal before any dial', () => {
     assert.match(String(row[C.OUTCOME]), /service address/i);
 });
 
-test('exactly one technician email goes out, to the on-call tech', () => {
+test('exactly one technician email goes out, to the on-call tech', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('inactive') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 
@@ -481,7 +481,7 @@ test('exactly one technician email goes out, to the on-call tech', () => {
     assert.match(body.subject, /^\[INACTIVE LOCATION\] /, `subject was: ${body.subject}`);
 });
 
-test('an active location gets no inactive prefix on the technician email', () => {
+test('an active location gets no inactive prefix on the technician email', skipIfNoAppsScript(), () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
 

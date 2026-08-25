@@ -1,15 +1,31 @@
--- Schedule sync-locations hourly. Replace the key on line 8, run the file.
--- pg_cron and pg_net are already enabled on this project.
+-- Schedule sync-locations hourly. pg_cron and pg_net are already enabled here.
+--
+-- ⚠️ DO NOT PUT THE KEY IN THIS FILE. This repository is public and this file is
+-- tracked. Run the one-line set_config below in the SAME SQL editor session first, then
+-- run the rest of the file. The key lives in the session and in Vault, never on disk.
+--
+-- Step 0 — paste this on its own, with your service_role key from Settings -> API,
+-- and do not save it:
+--
+--     select set_config('app.service_role_key', 'PASTE_KEY_HERE_IN_THE_EDITOR_ONLY', false);
+--
+-- Then run everything below.
 
--- 1. Store the service_role key (Settings -> API) in Vault, not in the job body:
---    cron.job.command is readable by anyone who can query that table.
+-- 1. Copy the session value into Vault, so the scheduled job has it for good.
+--    Vault and not the job body: cron.job.command is readable by anyone who can query
+--    that table.
+--
+--    Read via current_setting, not a psql :'variable' — psql does not substitute
+--    variables inside a dollar-quoted body, so an interpolated key would silently end up
+--    as the literal text.
 do $$
 declare
-    v_key text := 'PASTE_SERVICE_ROLE_KEY_HERE';
+    v_key text := current_setting('app.service_role_key', true);
     v_id  uuid;
 begin
-    if v_key like 'PASTE%' then
-        raise exception 'Replace PASTE_SERVICE_ROLE_KEY_HERE with the service_role key';
+    if v_key is null or v_key = '' or v_key like 'PASTE%' then
+        raise exception
+            'Run this first, in this session: select set_config(''app.service_role_key'', ''<your service_role key>'', false);';
     end if;
     select id into v_id from vault.secrets where name = 'service_role_key';
     if v_id is null then

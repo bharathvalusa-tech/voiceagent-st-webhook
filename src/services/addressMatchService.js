@@ -4,7 +4,8 @@ const {
     normalizeText,
     addressSimilarity,
     hasAddressQueryMatch,
-    buildAddressSearchQueries
+    buildAddressSearchQueries,
+    UNIT_TOKENS
 } = require('../utils/address');
 
 /**
@@ -28,14 +29,28 @@ const {
 // see tests/addressMatch.test.js.
 const MATCH_THRESHOLD = 0.72;
 
-// The winner must beat the runner-up by at least this much. Two Greenwin towers on the
+// The winner must beat the runner-up by at least this much. Two Northvale towers on the
 // same street score within a whisker of each other; that is a re-ask, not a match.
 const DECISIVE_MARGIN = 0.08;
 
 // A house number that disagrees is disqualifying, however well the street scores.
-// "125 Corcoran" and "127 Corcoran" are different buildings.
+// Two different numbers on the same street are two different buildings.
+//
+// UNIT NUMBERS MUST GO FIRST. Callers lead with the unit as often as not — "Unit 117,
+// 260 Maple Hollow Square" — and taking the first number in the string reads 117 as the
+// house number, disagrees with 125, and disqualifies the very row the caller named.
 const houseNumberOf = (address) => {
-    const match = normalizeText(address).match(/\b(\d+[a-z]?)\b/);
+    const withoutUnits = normalizeText(address)
+        .split(' ')
+        .reduce((kept, token, i, tokens) => {
+            // Drop a unit word and the number that follows it.
+            if (UNIT_TOKENS.has(token)) return kept;
+            if (i > 0 && UNIT_TOKENS.has(tokens[i - 1])) return kept;
+            return kept.concat(token);
+        }, [])
+        .join(' ');
+
+    const match = withoutUnits.match(/\b(\d+[a-z]?)\b/);
     return match ? match[1] : null;
 };
 
@@ -92,8 +107,8 @@ function matchAgainstRows(spoken, rows) {
     //
     // Without this rule the margin test is unwinnable on this data. hasAddressQueryMatch
     // floors every row sharing a street shape at 0.95, and the account holds many:
-    // 366 Adelaide Street West exists as Suite 605, Suite 400 and Suite 100; 141 Wilson
-    // Avenue appears under two postal codes; 46 Spadina Avenue is recorded three ways.
+    // 410 Kingsway Boulevard exists as Suite 605, Suite 400 and Suite 100; 141 Wilson
+    // Avenue appears under two postal codes; 52 Brookvale Street is recorded three ways.
     // A caller who gives the whole address, unit and all, has told us exactly which one —
     // refusing that to re-ask would be perverse.
     const EXACT = 0.995;

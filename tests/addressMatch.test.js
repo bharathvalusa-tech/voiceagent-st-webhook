@@ -10,28 +10,29 @@ const {
     DECISIVE_MARGIN
 } = require(path.join(REPO, 'src/services/addressMatchService'));
 
-// Shapes taken from real servicetrade_locations rows for the Adaptive account.
+// Synthetic rows shaped like real servicetrade_locations rows. The SHAPES are what
+// matter — three suites on one street, one street twice — not the street names.
 const row = (over = {}) => ({
     servicetrade_id: 6398685,
-    name: 'Residence(57 Admiral Rd.)',
+    name: 'Residence(31 Larkspur Rd.)',
     status: 'active',
-    street: '57 Admiral Road',
+    street: '31 Larkspur Road',
     city: 'Toronto',
     state: 'ON',
     postal_code: 'M5R 2L4',
     ...over
 });
 
-const ADELAIDE = [
-    row({ servicetrade_id: 1, name: 'Suite 605', street: '366 Adelaide Street West Suite 605', postal_code: 'M5V 1R9' }),
-    row({ servicetrade_id: 2, name: 'Suite 400', street: '366 Adelaide Street West, Suite #400', postal_code: 'M5V1R9' }),
-    row({ servicetrade_id: 3, name: 'Suite 100', street: '366 Adelaide Street West, Suite #100', postal_code: 'M5V 1R9' })
+const SUITES_ON_ONE_STREET = [
+    row({ servicetrade_id: 1, name: 'Suite 605', street: '410 Kingsway Boulevard Suite 605', postal_code: 'M5V 1R9' }),
+    row({ servicetrade_id: 2, name: 'Suite 400', street: '410 Kingsway Boulevard, Suite #400', postal_code: 'M5V1R9' }),
+    row({ servicetrade_id: 3, name: 'Suite 100', street: '410 Kingsway Boulevard, Suite #100', postal_code: 'M5V 1R9' })
 ];
 
 // ------------------------------------------------------------------ scoring
 
 test('an exact address resolves to its own row', () => {
-    const rows = [row(), row({ servicetrade_id: 7069786, street: '18 Yonge Street', postal_code: 'M5E 1Z8' })];
+    const rows = [row(), row({ servicetrade_id: 7069786, street: '22 Riverbend Street', postal_code: 'M5E 1Z8' })];
     const result = matchAgainstRows(rowAddress(rows[0]), rows);
 
     assert.strictEqual(result.matched, true);
@@ -40,15 +41,15 @@ test('an exact address resolves to its own row', () => {
 
 test('an abbreviated street still matches the expanded record', () => {
     // The fuzzy pass that did not exist before: ServiceTrade's `search=` misses this.
-    const rows = [row({ servicetrade_id: 2412959312296641, street: '4789 Yonge Street', postal_code: 'M2N 0G3' })];
-    const result = matchAgainstRows('4789 Yonge St Toronto', rows);
+    const rows = [row({ servicetrade_id: 2412959312296641, street: '4100 Riverbend Street', postal_code: 'M2N 0G3' })];
+    const result = matchAgainstRows('4100 Riverbend St Toronto', rows);
 
     assert.strictEqual(result.matched, true);
     assert.strictEqual(result.location.locationId, 2412959312296641);
 });
 
 test('a caller who omits city and postal code still matches', () => {
-    const result = matchAgainstRows('57 Admiral Road', [row()]);
+    const result = matchAgainstRows('31 Larkspur Road', [row()]);
     assert.strictEqual(result.matched, true);
 });
 
@@ -60,18 +61,50 @@ test('an unknown address returns no match, not a best guess', () => {
 });
 
 test('a different house number on the same street is disqualified', () => {
-    // "125 Corcoran" and "127 Corcoran" are different buildings, however well the street
+    // Two house numbers on one street are two buildings, however well the street
     // scores. Without the house-number guard the street similarity carries it.
-    const rows = [row({ servicetrade_id: 11, street: '125 Corcoran Court', city: 'East Gwillimbury', postal_code: 'L9N 0M8' })];
-    const result = matchAgainstRows('127 Corcoran Court, East Gwillimbury, ON', rows);
+    const rows = [row({ servicetrade_id: 11, street: '150 Thornbury Court', city: 'East Gwillimbury', postal_code: 'L9N 0M8' })];
+    const result = matchAgainstRows('152 Thornbury Court, East Gwillimbury, ON', rows);
 
     assert.strictEqual(result.matched, false);
+});
+
+test('a caller who leads with the unit still matches', () => {
+    // People say "Unit 117, 260 Maple Hollow" as often as the other way round. Taking the
+    // first number in the string read 117 as the house number and disqualified the row.
+    const rows = [row({ servicetrade_id: 117, street: '260 Maple Hollow Square, Unit 117' })];
+
+    for (const spoken of [
+        '260 Maple Hollow Square Unit 117 Toronto',
+        'Unit 117, 260 Maple Hollow Square, Toronto',
+        'Suite 117 260 Maple Hollow Square Toronto',
+        'Apt 117, 260 Maple Hollow Square, Toronto'
+    ]) {
+        const result = matchAgainstRows(spoken, rows);
+        assert.strictEqual(result.matched, true, `should match: ${spoken}`);
+        assert.strictEqual(result.location.locationId, 117);
+    }
+
+    // Street and unit alone, with no city at all, still scores below the threshold —
+    // and should. The house-number guard no longer rejects it, but there is genuinely
+    // little to go on. Lowering MATCH_THRESHOLD to catch this is not worth it: 0.72 is
+    // what gives 0 wrong locations across all 395 rows.
+    assert.strictEqual(matchAgainstRows('Apt 117 260 Maple Hollow Square', rows).matched, false);
+});
+
+test('a unit number never stands in for the house number', () => {
+    // The guard must still reject a genuinely different building, so stripping units
+    // cannot become "ignore all numbers".
+    const rows = [row({ servicetrade_id: 260, street: '260 Maple Hollow Square' })];
+    const result = matchAgainstRows('270 Maple Hollow Square, Unit 260', rows);
+
+    assert.strictEqual(result.matched, false, '270 is not 260, whatever the unit says');
 });
 
 // ------------------------------------------------------------------ ambiguity
 
 test('several suites on one street return ambiguous, so the agent asks', () => {
-    const result = matchAgainstRows('366 Adelaide Street West Toronto', ADELAIDE);
+    const result = matchAgainstRows('410 Kingsway Boulevard Toronto', SUITES_ON_ONE_STREET);
 
     assert.strictEqual(result.matched, false);
     assert.strictEqual(result.reason, 'ambiguous');
@@ -79,7 +112,7 @@ test('several suites on one street return ambiguous, so the agent asks', () => {
 });
 
 test('naming the suite resolves what the street alone could not', () => {
-    const result = matchAgainstRows('366 Adelaide Street West Suite 605, Toronto, ON, M5V 1R9', ADELAIDE);
+    const result = matchAgainstRows('410 Kingsway Boulevard Suite 605, Toronto, ON, M5V 1R9', SUITES_ON_ONE_STREET);
 
     assert.strictEqual(result.matched, true);
     assert.strictEqual(result.location.locationId, 1);
@@ -87,9 +120,9 @@ test('naming the suite resolves what the street alone could not', () => {
 
 test('an exact match wins even when a runner-up scores close', () => {
     // hasAddressQueryMatch floors every row sharing a street shape at 0.95, so on this
-    // account the margin test alone can never separate the Adelaide suites. The exact-match
-    // rule is what makes a fully-stated address usable.
-    const result = matchAgainstRows(rowAddress(ADELAIDE[1]), ADELAIDE);
+    // account the margin test alone can never separate suites in one tower. The
+    // exact-match rule is what makes a fully-stated address usable.
+    const result = matchAgainstRows(rowAddress(SUITES_ON_ONE_STREET[1]), SUITES_ON_ONE_STREET);
 
     assert.strictEqual(result.matched, true);
     assert.strictEqual(result.reason, 'matched_exact');
@@ -111,7 +144,7 @@ test('two rows with the identical address stay ambiguous', () => {
 test('empty and unusable input are refused without touching the rows', () => {
     assert.strictEqual(matchAgainstRows('', [row()]).reason, 'no_address_given');
     assert.strictEqual(matchAgainstRows('   ', [row()]).reason, 'no_address_given');
-    assert.strictEqual(matchAgainstRows('57 Admiral Road', []).reason, 'no_rows_for_agent');
+    assert.strictEqual(matchAgainstRows('31 Larkspur Road', []).reason, 'no_rows_for_agent');
 });
 
 test('the thresholds are the tuned values', () => {
@@ -158,10 +191,10 @@ test('the route reads args nested as a JSON string', async () => {
         }
     });
     try {
-        const { status, body } = await post(app.port, { args: JSON.stringify({ address: '123 Omni Drive Toronto' }) });
+        const { status, body } = await post(app.port, { args: JSON.stringify({ address: '77 Sandpiper Drive Toronto' }) });
         assert.strictEqual(status, 200);
         assert.strictEqual(body.data.address_found, true);
-        assert.strictEqual(body.data.address, '123 Omni Drive Toronto');
+        assert.strictEqual(body.data.address, '77 Sandpiper Drive Toronto');
     } finally { app.close(); }
 });
 
@@ -172,14 +205,14 @@ test('the route never leaks candidate addresses to the caller', async () => {
                 matched: false,
                 reason: 'ambiguous',
                 candidates: [
-                    { locationId: 1, address: '366 Adelaide Street West Suite 605', score: 0.95 },
-                    { locationId: 2, address: '366 Adelaide Street West Suite 400', score: 0.95 }
+                    { locationId: 1, address: '410 Kingsway Boulevard Suite 605', score: 0.95 },
+                    { locationId: 2, address: '410 Kingsway Boulevard Suite 400', score: 0.95 }
                 ]
             })
         }
     });
     try {
-        const { body } = await post(app.port, { address: '366 Adelaide Street West' });
+        const { body } = await post(app.port, { address: '410 Kingsway Boulevard' });
         assert.strictEqual(body.data.address_found, false);
         assert.strictEqual(body.data.ambiguous, true);
         assert.strictEqual(body.data.candidate_count, 2);
@@ -197,7 +230,7 @@ test('a thrown error still answers 200 with something to say', async () => {
         }
     });
     try {
-        const { status, body } = await post(app.port, { address: '57 Admiral Road' });
+        const { status, body } = await post(app.port, { address: '31 Larkspur Road' });
         assert.strictEqual(status, 200);
         assert.strictEqual(body.data.address_found, false);
         assert.strictEqual(body.data.reason, 'lookup_error');

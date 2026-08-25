@@ -72,7 +72,7 @@ const payload = ({ approved, inactive, unmatched, callId = 'call_out_test' }) =>
         retell_llm_dynamic_variables: {
             inbound_call_id: 'call_inbound_1',
             customer_name: 'Carlo Henry',
-            customer_address: '71 Todd Rd., Georgetown, ON',
+            customer_address: '9 Elmcrest Rd., Georgetown, ON',
             from_number: '+14169012663',
             call_summary: 'No heat',
             inactive_address: inactive ? 'true' : 'false',
@@ -98,7 +98,7 @@ const created = (over = {}) => ({
     matchedLocationName: '2213256 Ontario Ltd.',
     matchTier: 1,
     locationStatus: 'active',
-    matchedAddress: '71 Todd Rd., Georgetown, ON, L7G 4R8',
+    matchedAddress: '9 Elmcrest Rd., Georgetown, ON, L7G 4R8',
     ...over
 });
 
