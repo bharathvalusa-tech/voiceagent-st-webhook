@@ -12,8 +12,21 @@ const REPO = path.join(__dirname, '..');
  * SpreadsheetApp / UrlFetchApp / PropertiesService / LockService objects and asserting
  * on what it wrote and what it called.
  */
-function loadAppsScript({ rows = [], fetchHandler, properties = {} } = {}) {
-    const source = fs.readFileSync(path.join(REPO, 'google-sheet', 'code.gs'), 'utf8');
+function loadAppsScript({ rows = [], fetchHandler, properties = {}, config = {} } = {}) {
+    let source = fs.readFileSync(path.join(REPO, 'google-sheet', 'code.gs'), 'utf8');
+
+    // CONFIG is a top-level `const`, so it is a lexical binding inside the vm context
+    // and never appears on the sandbox object — a test cannot reach in and set a value.
+    // Patch the literal in the source instead. Only string and array entries are
+    // supported, which is all the test knobs are.
+    for (const [key, value] of Object.entries(config)) {
+        const literal = JSON.stringify(value);
+        const pattern = new RegExp('(\\n\\s*' + key + ':\\s*)(\\[[^\\]]*\\]|\'[^\']*\'|"[^"]*")', 'm');
+        if (!pattern.test(source)) {
+            throw new Error(`loadAppsScript: no CONFIG.${key} literal found to override`);
+        }
+        source = source.replace(pattern, (m, prefix) => prefix + literal);
+    }
 
     const NUM_COLS = 30;
     const grid = rows.map((r) => {

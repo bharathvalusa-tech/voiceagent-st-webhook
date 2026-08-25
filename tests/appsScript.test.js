@@ -139,6 +139,119 @@ test('an active location sends unmatched_address=false', () => {
     assert.strictEqual(vars.location_status_note, '');
 });
 
+// ------------------------------------------------- technician email redirection
+
+const techMail = (env) => {
+    const call = env.fetches.find((f) => f.url.includes('sendgrid'));
+    return call ? JSON.parse(call.options.payload) : null;
+};
+
+test('TEST_NOTIFICATION_EMAIL alone redirects the technician email', () => {
+    // Set on its own, with no test callers configured, it diverts EVERY row. This is the
+    // testing mode: you receive what the on-call technician would have received.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_NOTIFICATION_EMAIL: 'tester@example.com', TEST_OVERRIDE_NUMBERS: [] }
+    });
+    env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
+
+    const mail = techMail(env);
+    assert.ok(mail, 'the email is still sent');
+    assert.strictEqual(mail.personalizations[0].to[0].email, 'tester@example.com');
+    assert.strictEqual(mail.personalizations[0].cc, undefined,
+        'CC is suppressed so the client addresses never get a brief the tech did not');
+    assert.match(mail.subject, /\[REDIRECTED — REAL EMERGENCY\]/,
+        'a diverted REAL row must be unmistakable in the inbox');
+});
+
+test('with no test inbox set, the real technician is emailed and CC applies', () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_NOTIFICATION_EMAIL: '', TEST_OVERRIDE_NUMBERS: [] }
+    });
+    env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
+
+    const mail = techMail(env);
+    assert.notStrictEqual(mail.personalizations[0].to[0].email, 'tester@example.com');
+    assert.ok(mail.personalizations[0].cc && mail.personalizations[0].cc.length > 0,
+        'production keeps the CC list');
+    assert.ok(!/REDIRECTED/.test(mail.subject));
+});
+
+test('a test number with no inbox configured sends nothing at all', () => {
+    // Fails closed on purpose: falling back to the real technician would page them for
+    // what the tester meant to keep to themselves.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_NOTIFICATION_EMAIL: '', TEST_OVERRIDE_NUMBERS: ['+14169012663'] }
+    });
+    const sent = env.sandbox.sendTechnicianEmergencyEmail(
+        'realtech@adaptiveclimates.com', 'Real Tech', 'Carlo', '71 Todd Rd',
+        '+14169012663', 'No heat', 'transcript', 'call_1', new Date().toISOString(), 'active'
+    );
+
+    assert.strictEqual(sent, false);
+    assert.ok(!env.fetches.some((f) => f.url.includes('sendgrid')), 'no email leaves the building');
+});
+
+test('one knob does everything: call routing, both emails, and the row tag', () => {
+    // TEST_OVERRIDE_NUMBERS is the single switch. A call from a listed number must dial
+    // that number back, tag the row, and divert both emails — with nothing else set.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: {
+            TEST_OVERRIDE_NUMBERS: ['+14169012663'],
+            TEST_NOTIFICATION_EMAIL: 'tester@example.com'
+        }
+    });
+
+    // The ladder dials the test number, never the real contact.
+    const target = env.sandbox.getCallTarget(1, 0, '+14165551234', 'Real Tech', '+14169012663');
+    assert.strictEqual(target.phone, '+14169012663', 'the test number is dialled');
+    assert.strictEqual(target.name, 'Real Tech', 'the contact name is kept for the trail');
+
+    // The technician email goes to the test inbox only.
+    env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
+    const mail = techMail(env);
+    assert.strictEqual(mail.personalizations[0].to[0].email, 'tester@example.com');
+    assert.strictEqual(mail.personalizations[0].cc, undefined);
+
+    // And the client email carries the test inbox to the endpoint that sends it.
+    env.sandbox.notifyEscalationComplete(env.sheet, 2, 'created');
+    const notify = env.fetches.find((f) => f.url.includes('st-escalation-complete'));
+    assert.ok(notify, 'the endpoint is notified');
+    assert.strictEqual(JSON.parse(notify.options.payload).test_email, 'tester@example.com');
+});
+
+test('a real row carries no test_email, so the client email is untouched', () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_OVERRIDE_NUMBERS: [], TEST_NOTIFICATION_EMAIL: '' }
+    });
+    env.sandbox.notifyEscalationComplete(env.sheet, 2, 'created');
+
+    const notify = env.fetches.find((f) => f.url.includes('st-escalation-complete'));
+    assert.strictEqual(JSON.parse(notify.options.payload).test_email, '');
+});
+
+test('a test row with no inbox sends NO client email at all', () => {
+    // Fails closed. Emailing the real client about a test emergency is the worst outcome.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_OVERRIDE_NUMBERS: ['+14169012663'], TEST_NOTIFICATION_EMAIL: '' }
+    });
+    env.sandbox.notifyEscalationComplete(env.sheet, 2, 'created');
+
+    assert.ok(!env.fetches.some((f) => f.url.includes('st-escalation-complete')),
+        'the endpoint is never called, so the real client cannot be emailed');
+});
+
 test('the technician email is subject-flagged when the address is not on file', () => {
     const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('none') });
     env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);

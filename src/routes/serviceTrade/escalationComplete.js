@@ -128,11 +128,27 @@ router.post('/st-escalation-complete', async (req, res) => {
 
         const meta = REASONS[reason] || REASONS.manual_review;
 
+        // A test row diverts the client email. The Apps Script decides which rows are
+        // tests (CONFIG.TEST_OVERRIDE_NUMBERS) and sends its test inbox as `test_email`,
+        // because only it knows the caller's number and the test config. When present it
+        // becomes the SOLE recipient and the configured CC is dropped, so a test
+        // emergency never reaches the real client.
+        //
+        // overrideTo also bypasses the send_job_email gate inside sendJobNotification —
+        // intended: a test should send even for a tenant whose client email is switched
+        // off, otherwise there is nothing to verify.
+        const testEmail = String(body.test_email || '').trim();
+        if (testEmail) {
+            console.log(`[st-escalation-complete] TEST row — client email redirected to ${testEmail}, CC dropped`);
+        }
+
         // The client email is gated inside sendJobNotification by send_job_email, and
         // additionally by send_job_fail_email when the outcome is a failure. Both live
         // on the agent's servicetrade_tokens row, so per-tenant config still rules.
         const result = await emailNotificationService.sendJobNotification({
             settings,
+            overrideTo: testEmail || null,
+            overrideCc: null,
             outcome: isJobCreated ? 'job_created' : 'job_not_created',
             details: {
                 agentId,
