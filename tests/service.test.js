@@ -448,6 +448,77 @@ test('inbound lookup fails OPEN when ServiceTrade throws', async () => {
         assert.strictEqual(v.st_lookup_ok, 'false');
         assert.strictEqual(v.st_location_found, 'false');
         assert.strictEqual(v.st_lookup_reason, 'lookup_error');
+        // Present and empty, never absent. An ABSENT dynamic variable renders in the
+        // prompt as a literal {{address_match}}, which the agent would then read as a
+        // real address; an empty one renders as nothing.
+        assert.strictEqual(v.address_match, '');
+    } finally { app.close(); }
+});
+
+test('address_match is present and empty on every non-match path', async () => {
+    const cases = [
+        ['agent_not_enabled', 'agent_not_in_the_allowlist', '+19056710220'],
+        ['no_from_number', INBOUND_AGENT, '']
+    ];
+    for (const [expectedReason, agent, from] of cases) {
+        const app = await inboundApp({
+            '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
+            '../../services/locationPhoneIndex': {
+                normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
+                lookupByPhone: async () => null
+            },
+            '../../services/serviceTradeService': { searchContacts: async () => [] }
+        });
+        try {
+            const body = await callInbound(app.port, agent, from);
+            const v = body.call_inbound.dynamic_variables;
+            assert.strictEqual(v.st_lookup_reason, expectedReason);
+            assert.strictEqual(v.address_match, '', `address_match must be '' on ${expectedReason}`);
+        } finally { app.close(); }
+    }
+});
+
+test('a resolved caller gets the four spoken address parts, in order', async () => {
+    const app = await inboundApp({
+        '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
+        '../../services/locationPhoneIndex': {
+            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
+            lookupByPhone: async () => ({
+                locationId: 6398685,
+                locationName: 'Residence(57 Admiral Rd.)',
+                locationStatus: 'active',
+                address: { street: '57 Admiral Road', city: 'Toronto', state: 'ON', postalCode: 'M5R 2L4' },
+                matchedAddress: 'ignored — rebuilt from the parts'
+            })
+        },
+        '../../services/serviceTradeService': { searchContacts: async () => [] }
+    });
+    try {
+        const body = await callInbound(app.port, INBOUND_AGENT, '+14169012663');
+        const v = body.call_inbound.dynamic_variables;
+        assert.strictEqual(v.address_match, '57 Admiral Road, Toronto, ON, M5R 2L4');
+    } finally { app.close(); }
+});
+
+test('a blank address part is skipped rather than leaving a stray comma', async () => {
+    // Four of the 395 mirrored locations carry no postal code.
+    const app = await inboundApp({
+        '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
+        '../../services/locationPhoneIndex': {
+            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
+            lookupByPhone: async () => ({
+                locationId: 1,
+                locationName: 'No postal on file',
+                locationStatus: 'active',
+                address: { street: '123 Omni Drive', city: 'Toronto', state: 'ON', postalCode: '' },
+                matchedAddress: ''
+            })
+        },
+        '../../services/serviceTradeService': { searchContacts: async () => [] }
+    });
+    try {
+        const body = await callInbound(app.port, INBOUND_AGENT, '+14169012663');
+        assert.strictEqual(body.call_inbound.dynamic_variables.address_match, '123 Omni Drive, Toronto, ON');
     } finally { app.close(); }
 });
 
