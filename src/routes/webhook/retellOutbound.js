@@ -5,6 +5,7 @@ const { sendSuccessResponse, sendErrorResponse } = require('../../utils/response
 const { createJobFromCallContext } = require('../../services/contextJobService');
 const emailNotificationService = require('../../services/emailNotificationService');
 const supabaseService = require('../../services/supabaseService');
+const { recordEscalationLeg } = require('../../services/escalationStore');
 
 /**
  * POST /webhook/retell-outbound
@@ -52,6 +53,11 @@ const OUTCOMES = {
     // `declined` now means a HUMAN answered and said no, which ends the chain.
     no_answer: 'no job — no answer; nobody reached'
 };
+
+// OUTCOMES text -> its key. The sheet stores the sentence because a human reads column AA;
+// the dashboard stores the key because code branches on it. Deriving one from the other at
+// read time would mean parsing prose, so the key travels with the update instead.
+const OUTCOME_KEYS = Object.fromEntries(Object.entries(OUTCOMES).map(([key, text]) => [text, key]));
 
 // Disconnection reasons that mean the call was never answered by a person. Mirrors
 // the NO_ANSWER set in the Apps Script `classifyCall`, so the webhook and the sheet
@@ -121,7 +127,26 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * the webhook. Skips quietly if the exec URL is unset or we have no
  * inbound_call_id to key the row.
  */
-async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNumber, outcome, terminal = false, locationStatus = '' }) {
+async function notifySheet({ inboundCallId, outboundCallId, isJobCreated, jobNumber, outcome, terminal = false, locationStatus = '', agentId = '' }) {
+    // Mirror this leg to the Clara dashboard. Deliberately driven from inside notifySheet
+    // rather than from each of its eight call sites: one place to pass through means the
+    // two records are written from the same decision and cannot drift apart, and a new
+    // outcome is mirrored automatically. It never throws and is not awaited against the
+    // sheet write, which stays the source of truth.
+    //
+    // `jobNumber` travels with it because this is the only moment it exists — the
+    // ServiceTrade create returned it a few lines up the stack, and nothing downstream
+    // (Retell included) can see it.
+    recordEscalationLeg({
+        agentId,
+        inboundCallId,
+        outboundCallId,
+        outcomeKey: OUTCOME_KEYS[outcome],
+        terminal,
+        locationStatus,
+        jobNumber: isJobCreated ? jobNumber : ''
+    }).catch((err) => console.warn(`[retell-outbound] escalation mirror failed: ${err.message || err}`));
+
     const url = config.adaptiveSheetExecUrl;
     if (!url) {
         console.log('[retell-outbound] ADAPTIVE_SHEET_EXEC_URL not set — skipping sheet update');
@@ -337,7 +362,7 @@ router.post('/retell-outbound', async (req, res) => {
 
         if (nobodyAnswered) {
             console.log(`[retell-outbound] no answer (call_status: ${call.call_status}, disconnection_reason: ${call.disconnection_reason}) — no job for call ${callId}, agent ${agentId}; escalation continues`);
-            await notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_answer, terminal: false });
+            await notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_answer, terminal: false, agentId: configAgentId });
             return sendSuccessResponse(
                 res,
                 { status: 'skipped', reason: 'no_answer', call_id: callId },
@@ -367,7 +392,7 @@ router.post('/retell-outbound', async (req, res) => {
 
         if (voicemailDetected) {
             console.log(`[retell-outbound] voicemail detected (reached_voicemail: ${JSON.stringify(custom.reached_voicemail)}, in_voicemail: ${analysis.in_voicemail}, disconnection_reason: ${call.disconnection_reason}) — no job for call ${callId}, agent ${agentId}; escalation continues`);
-            await notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.voicemail, terminal: false });
+            await notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.voicemail, terminal: false, agentId: configAgentId });
             return sendSuccessResponse(
                 res,
                 { status: 'skipped', reason: 'voicemail', call_id: callId },
@@ -408,7 +433,8 @@ router.post('/retell-outbound', async (req, res) => {
                     jobNumber: '',
                     outcome: declinedOutcome,
                     terminal: true,
-                    locationStatus: declinedSheetStatus
+                    locationStatus: declinedSheetStatus,
+                    agentId: configAgentId
                 }),
                 sendJobEmail('job_not_created', {
                     reasonCode: 'tech_declined',
@@ -428,7 +454,7 @@ router.post('/retell-outbound', async (req, res) => {
         if (!configAgentId) {
             console.error(`[retell-outbound] approved but no outbound agent id on the call payload for call ${callId}`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true, agentId: configAgentId }),
                 alertInternal('No ServiceTrade config agent id available (call.agent_id missing from the outbound webhook payload)')
             ]);
             return sendSuccessResponse(
@@ -464,7 +490,8 @@ router.post('/retell-outbound', async (req, res) => {
                     jobNumber: '',
                     outcome: errOutcome,
                     terminal: true,
-                    locationStatus: rejectedForInactive ? 'inactive' : ''
+                    locationStatus: rejectedForInactive ? 'inactive' : '',
+                    agentId: configAgentId
                 }),
                 sendJobEmail('job_not_created', {
                     reasonCode: rejectedForInactive ? 'inactive_location_rejected' : 'internal_error',
@@ -485,7 +512,7 @@ router.post('/retell-outbound', async (req, res) => {
             // do. Their consent is recorded in the outcome trail and the email.
             console.error(`[retell-outbound] tech approved but no confident location match for call ${callId} (agent ${configAgentId})${dialledUnmatched ? ' — dialled with the address flagged as not on file' : ''}`);
             await Promise.allSettled([
-                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match, terminal: true }),
+                notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.no_match, terminal: true, agentId: configAgentId }),
                 sendJobEmail('job_not_created', {
                     reasonCode: 'no_matches',
                     reasonLabel: 'Technician Approved — No Location On File',
@@ -515,7 +542,8 @@ router.post('/retell-outbound', async (req, res) => {
                 jobNumber,
                 outcome: createdInactive ? OUTCOMES.created_inactive : OUTCOMES.created,
                 terminal: true,
-                locationStatus: jobResult.locationStatus || 'active'
+                locationStatus: jobResult.locationStatus || 'active',
+                agentId: configAgentId
             }),
             sendJobEmail('job_created', {
                 jobId: job.jobId,
@@ -538,7 +566,7 @@ router.post('/retell-outbound', async (req, res) => {
             // terminal: true, matching every other error branch. Omitting it defaulted to
             // false, which left the escalation chain live in the sheet after an
             // unexpected throw — the row kept dialling with no result ever landing.
-            notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true }),
+            notifySheet({ inboundCallId, outboundCallId: callId, isJobCreated: false, jobNumber: '', outcome: OUTCOMES.error, terminal: true, agentId: configAgentId }),
             sendJobEmail('job_not_created', { reasonCode: 'internal_error', reasonLabel: 'Job Creation Error', reasonMessage: OUTCOMES.error }),
             alertInternal(error.message || String(error))
         ]);

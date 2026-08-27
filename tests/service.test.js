@@ -567,6 +567,14 @@ test('inbound lookup falls back to contact search, and ignores catch-all contact
 test('a repeated escalation-complete does not send a second client email', async () => {
     const sends = [];
     const router = loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/escalationComplete'), {
+        // The dashboard mirror is stubbed out: this suite tests the webhook's own gate
+        // logic, and the store holds a live service-role Supabase client. Without this the
+        // suite would write test rows into the production escalation table.
+        '../../services/escalationStore': {
+            openEscalationChain: async () => {},
+            recordEscalationLeg: async () => {},
+            completeEscalationChain: async () => {}
+        },
         '../../services/supabaseService': { getServiceTradeToken: async () => [{ Name: 'Adaptive' }] },
         '../../services/emailNotificationService': {
             sendJobNotification: async (a) => { sends.push(a); return { sent: true }; },
@@ -603,6 +611,14 @@ test('the escalation-complete response reports counts, never addresses', async (
     // The response goes back to the Apps Script, which never reads the recipients — so
     // returning them only put client email addresses somewhere they did not need to be.
     const router = loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/escalationComplete'), {
+        // The dashboard mirror is stubbed out: this suite tests the webhook's own gate
+        // logic, and the store holds a live service-role Supabase client. Without this the
+        // suite would write test rows into the production escalation table.
+        '../../services/escalationStore': {
+            openEscalationChain: async () => {},
+            recordEscalationLeg: async () => {},
+            completeEscalationChain: async () => {}
+        },
         '../../services/supabaseService': { getServiceTradeToken: async () => [{ Name: 'Adaptive' }] },
         '../../services/emailNotificationService': {
             sendJobNotification: async () => ({
@@ -643,6 +659,14 @@ test('the escalation-complete response reports counts, never addresses', async (
 test('a FAILED send is not cached, so the Apps Script retry still gets through', async () => {
     let attempt = 0;
     const router = loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/escalationComplete'), {
+        // The dashboard mirror is stubbed out: this suite tests the webhook's own gate
+        // logic, and the store holds a live service-role Supabase client. Without this the
+        // suite would write test rows into the production escalation table.
+        '../../services/escalationStore': {
+            openEscalationChain: async () => {},
+            recordEscalationLeg: async () => {},
+            completeEscalationChain: async () => {}
+        },
         '../../services/supabaseService': { getServiceTradeToken: async () => [{ Name: 'Adaptive' }] },
         '../../services/emailNotificationService': {
             sendJobNotification: async () => {

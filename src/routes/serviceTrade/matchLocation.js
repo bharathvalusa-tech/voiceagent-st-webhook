@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { sendSuccessResponse, sendErrorResponse } = require('../../utils/responseHelper');
 const { matchLocationFromCallContext } = require('../../services/contextJobService');
+const { openEscalationChain } = require('../../services/escalationStore');
 
 /**
  * POST /st-match-location
@@ -105,6 +106,18 @@ router.post('/st-match-location', async (req, res) => {
         // exactly one sender. This endpoint's only job is the verdict.
 
         const status = inactive ? 'inactive' : (found ? 'matched' : 'none');
+
+        // Open the dashboard's escalation record. This gate is the last thing that runs
+        // before the first dial and only for a row that is genuinely escalating, so it is
+        // also the honest answer to "did an escalation happen at all". Awaited so a
+        // dispatch call can never be recorded before the chain it belongs to; it swallows
+        // its own failures, so it cannot hold up or fail the verdict.
+        await openEscalationChain({
+            agentId: agent_id,
+            inboundCallId: call_id,
+            locationStatus: found ? (outcome.locationStatus || 'active') : 'none'
+        });
+
         return sendSuccessResponse(
             res,
             {

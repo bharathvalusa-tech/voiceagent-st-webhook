@@ -104,10 +104,16 @@
 ### 2.1 Job-creation authority — the technician gates every job
 
 For Adaptive, **no inbound agent ever creates a ServiceTrade job.** All three inbound
-agents — main router (`agent_b2c6…`), office-hours (`agent_052c…`), and after-hours
-(`agent_efbe…979f`) — are listed in `POSTCALL_JOB_DISABLED_AGENT_IDS`, so the inbound
+agents — main router (`agent_efbe…979f`), office-hours (`agent_052c…`), and after-hours
+(`agent_b2c6…`) — are listed in `POSTCALL_JOB_DISABLED_AGENT_IDS`, so the inbound
 handler `src/routes/webhook/retell.js` hits its `isPostCallJobDisabledAgent(agentId)`
 check (`:685`), returns early, and creates nothing.
+
+> **Corrected 2026-08-27.** This previously named `agent_b2c6…` as the main router and
+> `agent_efbe…979f` as after-hours. Retell `GET /get-agent` says the opposite:
+> `agent_efbe503faedf1bf516f961979f` is **"Adaptive Climates (Main Router)"**. It matters
+> beyond naming — that id is the one in `user_profiles` (id 174), so it is the only Adaptive
+> agent whose calls reach `call_logs` and the dashboard.
 
 The **only** place a job is created is the outbound post-call webhook
 `src/routes/webhook/retellOutbound.js`, which:
@@ -223,10 +229,14 @@ derive it, since all three cases used to read as `no job — tech declined`.
        (`{{inactive_address}}` / `{{location_status_note}}`), emailed with an
        `[INACTIVE LOCATION]` subject prefix, and their yes or no decides the job exactly
        as it would for an active location.
-     - `none` → **terminal, no call.** There is no `locationId`, so `POST /job` is
-       impossible (`required: ['locationId','type']`). Outcome
-       `no job created — no valid ServiceTrade location for the address`, manual-review
-       client email.
+     - `none` → **dial anyway.** Corrected 2026-08-27: this said "terminal, no call", and
+       the code has not behaved that way since the reversal at `code.gs:1196-1216` — it
+       now dials on *every* verdict. An address not on file is a bookkeeping gap, and
+       treating it as terminal meant nobody was ever dialled: the office got an email and
+       the caller got nothing. The technician is told the address is not on file and still
+       decides. Their yes cannot auto-create the job (`POST /job` requires a `locationId`),
+       so the post-call webhook ends the chain with `no_match` and asks the office to
+       create it by hand.
 
      **Fail-open:** any endpoint error / non-200 → the call is placed anyway and AD reads
      `failed_open` (a transient outage never suppresses a real emergency). Uses the same
@@ -338,11 +348,166 @@ call2 - answered
 call2 - no job — tech declined
 ```
 
+## 7.1 The dashboard record (`escalation_chains`)
+
+The escalation is mirrored into Postgres so the Clara dashboard can show the dispatch
+timeline on the call record. **This file is the single record for that** — the copy that
+used to live in `claim-craft-ai-web-73/docs` was deleted, because it went stale and
+contradicted this one in five places.
+
+It is a **side-channel**: the sheet is still the state machine, the ServiceTrade job still
+comes from the outbound post-call webhook, and nothing here decides anything. Every write
+swallows its own failures — a dashboard write must never fail an escalation webhook or
+delay a technician being dialled.
+
+### Why THIS service writes it
+
+Two of the facts the dashboard needs exist only here, and only at the moment they happen:
+
+- **`job_number`** — returned by the ServiceTrade create in `retellOutbound.js`. Nothing
+  downstream can see it, Retell included.
+- **`no_match` / `error` / `inactive_job_failed`** — the outcomes that become
+  `manual_review`. They are decided *after* the call, when ServiceTrade is actually tried.
+  Retell can distinguish answered / no-answer / voicemail / declined on its own, but it
+  cannot tell `created` from approved-but-failed.
+
+So writing straight to Supabase from here is not a shortcut — it is the only place the full
+picture exists. `clara-lead-agent-server` then enriches each leg from Retell (recording,
+transcript, `contact_name`, duration) and derives every status.
+
+There is **no HTTP hop and no shared secret**: `src/services/escalationStore.js` uses the
+`SUPABASE_SERVICE_ROLE_KEY` this service already has. It builds its own client rather than
+using `config/database.js`, because that one prefers the anon key and `escalation_chains`
+has RLS enabled with no policy — an anon write is denied outright.
+
+### The three write points
+
+| Trigger | File | Writes |
+|---|---|---|
+| Location gate, first dial only | `routes/serviceTrade/matchLocation.js` | opens the chain, `location_status` |
+| Each dispatch call ends | `routes/webhook/retellOutbound.js`, inside `notifySheet` | the leg + `outcome_key` + `terminal` + `job_number` |
+| Escalation complete | `routes/serviceTrade/escalationComplete.js` | `outcome_trail`, `escalation_complete` |
+
+Writing at each of the three is what makes the timeline fill in **during** a 5-20 minute
+escalation rather than only at the end.
+
+**The gate is what defines "an escalation happened".** Only the first write creates a row.
+Anything that stops earlier — not flagged as an emergency on the call, inside the
+45-minute alarm-monitor cooldown, no service address captured — has no row, and the
+dashboard shows no panel. Intended, not a gap.
+
+**The leg write lives inside `notifySheet`, not at its eight call sites.** That is the one
+place every leg outcome already passes through, so the sheet and the dashboard are written
+from the same decision and cannot describe the same event differently — and a new outcome
+is mirrored automatically. `OUTCOME_KEYS` maps the sheet's prose to the machine key: the
+sheet stores the sentence because a human reads column AA, the dashboard stores the key
+because code branches on it.
+
+**`completion_reason` is deliberately not written here.** Telling a technician declining
+from an approved-but-failed job needs the terminal leg's outcome key, which the reading
+side derives (`deriveCompletionReason`). A guess here would fight it.
+
+Everything is gated on `config.escalationEmailAgentIds` — the same allowlist as the
+consolidated escalation email, so a tenant is either on this flow or off it.
+
+### Concurrency
+
+`calls` is a JSONB array with **two writers**: this service appends a leg as its dispatch
+call ends, and `clara-lead-agent-server` enriches the same leg from Retell. They overlap in
+practice — a chain is often open in the dashboard while the next leg lands.
+
+Both go through the SQL function `escalation_merge_leg(p_inbound_call_id, p_leg)`, which
+does the merge inside one `UPDATE` under the row lock and drops null-valued keys, so a
+partial write from either side can never blank a field the other set. A read-modify-write
+from either client would silently lose the other's update.
+
+### The Apps Script is unchanged
+
+It already POSTs `outcome_trail` (column AA verbatim) to `/st-escalation-complete`, which
+is the only source for the chain-level events — the location-gate wording, the
+alarm-monitor cadence note, cooldown suppression.
+
+An earlier plan added `callN - dialling {name}` lines to the script to supply the contact
+name. **That was reverted**: Retell returns `contact_name` on every dispatch call in
+`retell_llm_dynamic_variables`, so the lines bought nothing and cost a manual paste into
+live production. See `docs/session.md`.
+
+### What the dashboard reads
+
+`GET /api/call-logs/:callId/escalation` on `clara-lead-agent-server`, scoped to the
+caller's tenant, returning:
+
+```jsonc
+{
+  "chain_state": "active" | "complete",   // no third state: no row => no panel
+  "chain": { "completion_reason": …, "is_job_created": …, "job_number": …, "location_status": … },
+  "chain_log": [ /* events belonging to the emergency, not to any one call */ ],
+  "calls":     [ /* one per dispatch call, each with its own `log` already grouped */ ],
+  "timeline":  [ /* every event, flat and ordered, for the combined view */ ]
+}
+```
+
+Grouping happens server-side: `chain_log` plus every `calls[i].log` equals `timeline`
+exactly. The frontend renders `calls[i].log` directly and never regroups by `call_id`.
+
+The list endpoint also returns `has_escalation` per row, which is the **sole** gate for
+showing escalation UI. Not `lead_type === 'Emergency'`: that is our own classifier's
+opinion and the two disagree in production in both directions —
+`call_f1c370e061a5541ea8879dc97bb` is `lead_type: "Service"` and produced ServiceTrade job
+`50366617` through a real escalation.
+
+### The status sets
+
+**Chain — `completion_reason`:**
+
+| Status | Meaning |
+|---|---|
+| `created` | Technician approved; a ServiceTrade job exists |
+| `tech_declined` | A technician answered and said no |
+| `manual_review` | Reached, but no job and no clean decline — approved with no location, or a job-creation error |
+| `exhausted` | Every contact dialled, nobody answered |
+
+`tech_declined` is **derived**, not sent: the Apps Script collapses it into
+`manual_review`, but the terminal leg's outcome key names it exactly.
+
+**Per call — `calls[].status`**, twelve values: `ringing` · `no_answer` · `busy` ·
+`failed` · `declined_call` · `voicemail` · `answered_approved` · `answered_declined` ·
+`answered_transferred` · `answered_no_decision` · `job_failed` · `approved_manual`.
+
+The last two are the ones a four-value model gets wrong: the technician said **yes** in
+both, and collapsing them to "answered with no job badge" reads as a decline.
+`approved_manual` occurs in production — sheet row 454 is one.
+
+`location_status` (`active` | `inactive` | `none` | `failed_open`) and `terminal` travel
+beside the status rather than multiplying it.
+
+### GPT on dispatch calls
+
+Dispatch calls are **not** in `call_logs` — their agent is not in `user_profiles`, so the
+webhook-ingest consumer drops the event — and therefore cannot use the `call_logs` GPT
+pass. They ride a second message type on the same SQS queue,
+`{ type: 'escalation_leg', … }`, handled by `EscalationGPTService` with its own prompt
+(`contact_reached`, `job_approved`, `decline_reason`, `promised_eta`, `notes_for_office`),
+writing back into `escalation_chains.calls[i]`.
+
+Enqueued by `clara-lead-agent-server` when enrichment first sees a transcript. Most legs
+ring out and have none, so most cost nothing.
+
+### Backfill
+
+`clara-lead-agent-server`'s `npm run backfill-escalations` rebuilds history from sheet row
+453 (`call_d057a98568b16327a85624eeab5`, inbound start `2026-08-25T11:06:58.925Z`) onward:
+6 chains, 7 legs. Every leg is reconstructed from Retell — `list-calls` for the outbound
+agent, grouped by the `inbound_call_id` dynamic variable, which is present on all of them.
+`job_number` and `is_job_created` come from a transcribed fixture of sheet columns AB/AC,
+because six rows is not worth a Google service account. Idempotent.
+
+
 ## 8. Key config / env
 
 | Where | Key | Purpose |
 |-------|-----|---------|
-| voiceagent-st-webhook | `API_GATEWAY_URL` | Vercel `adaptiveclimate.py` endpoint |
+| voiceagent-st-webhook | `API_GATEWAY_URL` | **The AWS API Gateway** (`d4so4tj9h4.execute-api.ap-south-1.amazonaws.com/webhook`) → SQS → `clara-lead-agent-server`. Corrected 2026-08-27: this said "Vercel `adaptiveclimate.py` endpoint", which is a different service reached by its own path. This forward is why Adaptive calls appear in `call_logs` at all |
 | voiceagent-st-webhook | `ADAPTIVE_SHEET_EXEC_URL` | GAS web app (`job_update` write-back) |
 | voiceagent-st-webhook | *(none — ST config owner)* | resolved per-tenant from the **outbound agent's own id** (`call.agent_id`) → its `servicetrade_tokens` + `servicetrade_job_configs` rows. No global default env var (removed); missing row → loud 500. See §2.1 |
 | voiceagent-st-webhook | `POSTCALL_JOB_DISABLED_AGENT_IDS` | inbound agents blocked from post-call job creation (all 3 Adaptive inbound agents) — see §2.1 |
@@ -353,4 +518,5 @@ call2 - no job — tech declined
 | GAS `CONFIG` | `ALARM_MONITOR_NUMBERS`, `SAME_NUMBER_COOLDOWN_MINUTES` | automated-caller cooldown |
 | GAS `CONFIG` | `CLIENT_NOTIFICATION_EMAILS` | recipients of the consolidated client email (WS-6) |
 | GAS `CONFIG` | `TEST_OVERRIDE_NUMBER` | route every escalation call to one test phone |
+| voiceagent-st-webhook | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | already configured; used by `escalationStore.js` for the dashboard record. No new vars — the mirror needs no URL and no shared secret |
 ```
