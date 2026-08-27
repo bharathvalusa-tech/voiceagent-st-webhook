@@ -513,3 +513,111 @@ locations, 204 distinct numbers, ~755ms), and every `serviceTradeService.*` /
   as **true** — Clara would read the location note on every call.
 - Everything in §6 and §9 that is still unticked, in particular the plaintext credentials
   in `code.gs` and the `validate_address` failure.
+
+---
+
+## Session 2026-08-27 — the dashboard record
+
+Added the `escalation_chains` mirror so the Clara dashboard can show the dispatch timeline
+on a call record. Contract in `docs/adaptive-call-flow.md` §7.1.
+
+### Decisions that must not be quietly reverted
+
+**1. This service writes Supabase directly. There is no HTTP hop and no shared secret.**
+
+An earlier plan had this service POST to new `/api/escalations/*` routes on
+`clara-lead-agent-server`, protected by a `CLARA_ESCALATION_SECRET` shared with
+`MILEHI_RETELL_SHARED_SECRET`. Both were removed along with the routes.
+
+The secret only existed to protect an endpoint that had been invented for the purpose: it
+would have been publicly reachable on `clara-answering-services.justclara.ai`, and without
+authentication anyone could inject fabricated escalation records into a tenant's dashboard.
+Since this service already holds `SUPABASE_SERVICE_ROLE_KEY`, writing straight to Postgres
+removes the endpoint, the secret and two env vars at once.
+
+If you find yourself adding an HTTP client here to talk to `clara-lead-agent-server`,
+this is the reasoning you are undoing.
+
+**2. `escalationStore.js` builds its own Supabase client rather than using
+`config/database.js`.**
+
+That shared client prefers `SUPABASE_ANON_KEY`, and `escalation_chains` has RLS enabled with
+no policy — an anon write is denied outright. Kept separate so widening privileges for the
+escalation record cannot widen them for every other query in the service.
+
+**3. The Apps Script was NOT changed, and a change to it was reverted.**
+
+An earlier plan added four `callN - dialling {name}` lines to `google-sheet/code.gs`, on the
+premise that the contact name was the one thing column AA does not carry. That premise was
+false — Retell returns `contact_name` on every dispatch call in
+`retell_llm_dynamic_variables` (verified: "Tack Lee", "Shaquille Donalds", "John McLean").
+The step anchor is solved by the leg count, and the placed-at time by Retell's
+`start_timestamp`.
+
+So the lines bought nothing and cost the riskiest step in the plan — a manual paste into
+live production code that appears in no diff. Reverted. The only edit to `code.gs` that
+survived is the header comment fix in item 5.
+
+**4. The leg write lives inside `notifySheet`, not at its eight call sites.**
+
+`notifySheet` is the one place every leg outcome passes through. Mirroring from inside it
+means the sheet and the dashboard are written from the same decision and cannot drift, and
+a newly added outcome is mirrored automatically. Moving the call out to the individual
+gates would reintroduce eight places to keep in step.
+
+**5. The `Code.gs` header comment was corrected — and it was wrong, not stale.**
+
+It described a **seven**-step ladder at 10-minute spacing ending with Brian Kerr. The code
+runs **four** steps at five minutes (`MAX_ESCALATION_ATTEMPTS = 4`, `DELAY_MINUTES = 5`),
+and Brian Kerr appears in neither `CONFIG.CONTACTS` nor `getCallTarget` — only in that
+comment and one `console.log`. The comment now says so explicitly, so it does not come back.
+
+**6. `completion_reason` is derived on read, not written here.**
+
+Distinguishing a technician declining from an approved-but-failed job needs the terminal
+leg's outcome key. The reading side has that; a value written here would fight it.
+
+### Corrections to earlier documentation
+
+Found and fixed while doing this. Recorded so the same wrong beliefs do not return.
+
+- **The agent ids were swapped.** `docs/adaptive-call-flow.md` called `agent_b2c640…` the
+  main router and `agent_efbe…979f` after-hours. Retell `GET /get-agent` says the opposite,
+  and it matters: `agent_efbe…979f` is the id in `user_profiles`, so it is the only Adaptive
+  agent whose calls reach `call_logs` at all.
+- **`API_GATEWAY_URL` is the AWS gateway**, not the Vercel Python function. That forward is
+  how Adaptive calls reach `call_logs`.
+- **A `none` location verdict is not terminal.** Both this repo's `CLAUDE.md` and the flow
+  doc said no call is placed. The code dials on every verdict (`code.gs:1196-1216`).
+- **Two chain statuses in `escalationComplete.js` are dead code** — `no_location_match` and
+  `inactive_location` are never sent, because of the previous item.
+- **The duplicate flow doc in `claim-craft-ai-web-73/docs` was deleted.** It had drifted from
+  this one in five places. One record, in the repo that does the work.
+
+### Still outstanding
+
+- The `escalation_chains` migration is **not applied**. Nothing works until it is; the table
+  and the `escalation_merge_leg` function are in
+  `claim-craft-ai-web-73/supabase/migrations/20260827090000_create_escalation_chains.sql`.
+- The backfill **has been run** (2026-08-27) via `npm run backfill-escalations` in
+  `clara-lead-agent-server`: 6 chains, 7 legs from row 453, every derived outcome
+  cross-checking against sheet columns AB/AC. Re-running is safe — it upserts on
+  `inbound_call_id` and merges legs through `escalation_merge_leg`, verified by running it
+  twice and getting 6 chains / 7 legs both times.
+  - **`gpt_status` is still `0` on all seven legs.** The SQS enqueue failed locally with
+    `Could not load credentials from any providers` — the machine has no AWS credentials,
+    and the swallow-and-continue path did its job. On the deployed service (which has an
+    IAM role) `EscalationReconcileSweeper` picks them up, but **only while `completed_at`
+    is inside its 24-hour window**. Past that they keep `retell_summary`, which is
+    populated, and never get a GPT summary. Re-run the script from an environment with AWS
+    credentials to enqueue them.
+  - `clara-lead-agent-server/.env` was **JSON**, so dotenv parsed zero variables and the
+    first run failed with `Retell list-calls returned HTTP 401` on an empty key. Converted
+    to `KEY=value` lines; the original is at `.env.json.bak`. Worth knowing because the
+    failure mode is silent — dotenv reports `injecting env (0)` and carries on.
+- Sheet row 454 (`call_41ab3ab4adaae59a900ed86ae53`) is a `[TEST_ROW]` and was backfilled
+  like any other. It will appear in the dashboard as a real escalation. Decide whether test
+  rows should be filtered — the timeline already carries a `test_row` event to key off.
+- The Lovable branch *Emergency Call History Escalation Draft* still renders
+  `FAKE_ESCALATIONS`. The prompt to wire it up is in
+  `claim-craft-ai-web-73/docs/lovable-prompts.md`.

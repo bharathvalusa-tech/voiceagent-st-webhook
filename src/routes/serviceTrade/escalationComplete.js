@@ -4,6 +4,7 @@ const config = require('../../config/environment');
 const { sendSuccessResponse, sendErrorResponse } = require('../../utils/responseHelper');
 const emailNotificationService = require('../../services/emailNotificationService');
 const supabaseService = require('../../services/supabaseService');
+const { completeEscalationChain } = require('../../services/escalationStore');
 
 /**
  * POST /st-escalation-complete
@@ -187,6 +188,11 @@ router.post('/st-escalation-complete', async (req, res) => {
                 errorMessage: `No job_update was ever received for inbound call ${callId}. The escalation email was sent from the Apps Script backstop, so the outbound webhook write-back may be failing.`
             }).catch((e) => console.error('[st-escalation-complete] internal alert failed:', e.message || e));
         }
+
+        // Mirror the finished chain to the dashboard. Sent after the email because the
+        // email is what this route exists for; a dashboard write must never come between
+        // a terminal escalation and the client being told about it.
+        await completeEscalationChain(body);
 
         // Recorded only now, after the send actually succeeded. A skipped send
         // (notifications disabled, no recipients) is not recorded either — nothing went

@@ -31,6 +31,14 @@ async function withWebhook(jobResult, run) {
     const sinkUrl = `http://127.0.0.1:${sink.address().port}/exec`;
 
     const router = loadWithMocks(path.join(REPO, 'src/routes/webhook/retellOutbound'), {
+        // The dashboard mirror is stubbed out: this suite tests the webhook's own gate
+        // logic, and the store holds a live service-role Supabase client. Without this the
+        // suite would write test rows into the production escalation table.
+        '../../services/escalationStore': {
+            openEscalationChain: async () => {},
+            recordEscalationLeg: async () => {},
+            completeEscalationChain: async () => {}
+        },
         '../../services/contextJobService': {
             createJobFromCallContext: async () => {
                 if (jobResult instanceof Error) throw jobResult;

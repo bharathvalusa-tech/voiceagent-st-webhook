@@ -44,12 +44,23 @@ These look like bugs and are not. Each was raised and kept:
 
 - an **inactive** ServiceTrade location does NOT block dispatch or job creation. The
   technician is called, told, and their yes or no decides the job. Reversed deliberately
-  on 2026-08-14 — see `docs/session.md` §4. Only `none` (no location at all) is terminal
+  on 2026-08-14 — see `docs/session.md` §4. **Nor does `none`**: corrected 2026-08-27,
+  this said "only `none` is terminal", but `code.gs:1196-1216` dials on every verdict.
+  A `none` address is dispatched too; the technician is told it is not on file, and the
+  job is created by hand afterwards
 - the technician alert CCs the client addresses
 - when the on-call tech has an email but no phone, a backup contact is dialled while the tech is
   still the one emailed
 - only the on-call technician is ever emailed; backup contacts are dialled cold
 - a test call creates a real ServiceTrade job against a real customer location
+- the escalation record is written **straight to Supabase** from `src/services/escalationStore.js`,
+  not pushed over HTTP to `clara-lead-agent-server`. There is no ingest endpoint and no shared
+  secret by design — see `docs/session.md` (2026-08-27, item 1). It also builds its own
+  service-role client rather than using `config/database.js`, which prefers the anon key that
+  RLS denies
+- the Apps Script is **not** part of the escalation-record change. Four `callN - dialling`
+  lines were added and then reverted once it was clear Retell already supplies `contact_name`
+  — item 3 in that same entry
 
 ## Running things
 
