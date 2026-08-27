@@ -456,6 +456,35 @@ opinion and the two disagree in production in both directions —
 `call_f1c370e061a5541ea8879dc97bb` is `lead_type: "Service"` and produced ServiceTrade job
 `50366617` through a real escalation.
 
+### What is visible, and when
+
+The dashboard has two states and no third. This matters because the escalation runs 5-20
+minutes and most of what it produces is only known at the end.
+
+| `chain_state` | When | What the dashboard shows |
+|---|---|---|
+| `active` | The location gate has opened the chain; the Apps Script has not closed it | **Only that an escalation is in progress**, with the start time. `calls` and `chain_log` are empty |
+| `complete` | The Apps Script POSTed `/st-escalation-complete` | **Everything at once** — every escalation child, every log row between them, the outcomes, the final status |
+| *(endpoint returns null)* | No chain row | Nothing. No panel |
+
+**Why nothing partial is shown while it runs.** Two facts make a partial render misleading
+rather than useful:
+
+- A leg is written when its dispatch call **ends**, not when it is placed — `notifySheet`
+  runs on the post-call gates. So while Clara is actually ringing a technician there is no
+  row for that call, and a count would understate and then jump.
+- `outcome_trail` — the only source for the chain-level rows and the per-leg logs — is sent
+  once, by `notifyEscalationComplete`, at the terminal state. Until then the timeline is
+  genuinely empty.
+
+Closing the second gap would mean sending the trail on each Apps Script tick, which is a
+change to the gitignored production script. That was deliberately not done: the "in
+progress, results on completion" behaviour is honest about what is actually known, and the
+office reads the escalation once it resolves rather than watching it tick.
+
+A consequence worth knowing: `CallStatus.ringing` is defined but **currently unreachable**,
+because no leg exists while its call is ringing.
+
 ### The status sets
 
 **Chain — `completion_reason`:**
