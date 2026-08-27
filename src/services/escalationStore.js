@@ -211,7 +211,31 @@ async function completeEscalationChain(body = {}) {
             .update(patch)
             .eq('inbound_call_id', inboundCallId);
         if (error) throw error;
-        console.log(`[escalation-store] completed chain ${inboundCallId} (${body.reason || 'no reason'})`);
+
+        // The Apps Script hands us the dispatch call ids it placed, so record any we do
+        // not already have. Each leg is normally captured live from its own post-call
+        // webhook; this closes the case where one of those never arrived, using the
+        // escalation's own record of what it dialled.
+        //
+        // NOT a complete list: the sheet has three id slots and the third is reused from
+        // the third attempt onward, so a four-attempt chain reports only three ids. It is
+        // a floor, not a ceiling — clara-lead-agent-server reconciles against Retell for
+        // the rest. The merge is keyed on outbound_call_id, so re-recording a leg already
+        // captured live is a no-op rather than a duplicate.
+        const ids = Array.isArray(body.response_call_ids) ? body.response_call_ids : [];
+        for (const id of ids) {
+            const outboundCallId = String(id || '').trim();
+            if (!outboundCallId) continue;
+            const { error: legErr } = await db.rpc('escalation_merge_leg', {
+                p_inbound_call_id: inboundCallId,
+                p_leg: { outbound_call_id: outboundCallId }
+            });
+            if (legErr) {
+                console.warn(`[escalation-store] could not record leg ${outboundCallId}: ${legErr.message}`);
+            }
+        }
+
+        console.log(`[escalation-store] completed chain ${inboundCallId} (${body.reason || 'no reason'}), ${ids.length} leg id(s) from the sheet`);
     } catch (err) {
         console.error(`[escalation-store] completeEscalationChain(${inboundCallId}) failed: ${err.message || err}`);
     }

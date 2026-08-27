@@ -335,3 +335,40 @@ test('a leg is still recorded when the inbound call is not in call_logs yet', as
     assert.strictEqual(fake.calls.inserts.length, 0, 'no chain without a resolvable tenant');
     // The sweep's orphan discovery in clara-lead-agent-server recovers this one from Retell.
 });
+
+test('completion records the dispatch call ids the Apps Script reports', async () => {
+    // The escalation's own record of what it dialled. Each leg is normally captured live
+    // from its post-call webhook; this covers one that never arrived.
+    const fake = fakeSupabase({ chainExists: true });
+    const store = loadStore(fake);
+
+    await store.completeEscalationChain({
+        agent_id: OUTBOUND_AGENT,
+        inbound_call_id: 'call_inbound_1',
+        reason: 'exhausted',
+        response_call_ids: ['call_out_1', 'call_out_2', 'call_out_3']
+    });
+
+    const merged = fake.calls.rpcs.map((r) => r.args.p_leg.outbound_call_id);
+    assert.deepStrictEqual(merged, ['call_out_1', 'call_out_2', 'call_out_3']);
+    for (const r of fake.calls.rpcs) {
+        assert.strictEqual(r.args.p_inbound_call_id, 'call_inbound_1');
+        // Only the id — the outcome key belongs to whichever source knows it, and an empty
+        // patch must not blank what a live leg write already recorded.
+        assert.deepStrictEqual(Object.keys(r.args.p_leg), ['outbound_call_id']);
+    }
+});
+
+test('completion with no reported ids still settles the chain', async () => {
+    const fake = fakeSupabase({ chainExists: true });
+    const store = loadStore(fake);
+
+    await store.completeEscalationChain({
+        agent_id: OUTBOUND_AGENT,
+        inbound_call_id: 'call_inbound_1',
+        reason: 'no_address'
+    });
+
+    assert.strictEqual(fake.calls.rpcs.length, 0);
+    assert.strictEqual(fake.calls.updates[0].patch.escalation_complete, true);
+});
