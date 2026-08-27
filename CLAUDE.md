@@ -15,6 +15,12 @@ post-call, and sends the client notification emails.
 `google-sheet/` and `retell/` are **gitignored** (`.gitignore:152`, `:75`) but hold **live
 production code**: the deployed Apps Script `Code.gs` and the Retell agent configs.
 
+**And the mirror has drifted.** As of 2026-08-28, 11 of 53 functions in `google-sheet/code.gs`
+differ from the deployed script — the mirror is ahead on a partly-deployed test-row diversion,
+and behind on a config rename. So it is not a record of what is running: **read the live editor
+before assuming, and never paste the mirror in wholesale** — that would ship undeployed work
+into emergency dispatch as a side effect. Details in `docs/session.md` (2026-08-28).
+
 Changes there appear in no diff, no commit and no PR, and reach production only by being pasted
 into the Apps Script editor and the Retell dashboard. A PR touching this flow is usually **not** the
 whole change — check those directories before assuming otherwise, and say plainly when work lands

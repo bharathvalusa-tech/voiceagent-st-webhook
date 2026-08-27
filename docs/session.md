@@ -621,3 +621,70 @@ Found and fixed while doing this. Recorded so the same wrong beliefs do not retu
 - The Lovable branch *Emergency Call History Escalation Draft* still renders
   `FAKE_ESCALATIONS`. The prompt to wire it up is in
   `claim-craft-ai-web-73/docs/lovable-prompts.md`.
+
+---
+
+## Session 2026-08-28 — the mirror has drifted from the deployed script
+
+`google-sheet/code.gs` is **not** a reliable record of what is running. Compared against the
+live Apps Script editor on 2026-08-28, with comments stripped so only executable code was
+compared: local 55,422 characters, live 55,058, and **11 of 53 functions differ**. Same 53
+functions on both sides — nothing added or removed, so this is drift inside bodies rather
+than a missing feature.
+
+| Function | local | live | delta |
+|---|---|---|---|
+| `notifyEscalationComplete` | 2315 | 1946 | +369 |
+| `sendTechnicianEmergencyEmail` | 6473 | 6279 | +194 |
+| `getCallTarget` | 764 | 955 | −191 |
+| `SENDGRID_CONFIG` | 284 | 261 | +23 |
+| `CONFIG` | 589 | 611 | −22 |
+| `doPost`, `processEscalationRowWithEmail`, `setupTriggers`, `processAllEscalations`, `recordCallTime`, `isTestCaller` | | | −4 … +2 |
+
+### What the drift actually is
+
+**A test-row diversion that was only partly deployed.** Live has it in `getCallTarget`
+(`isTestCaller` and `TEST_OVERRIDE` both present) and in `sendTechnicianEmergencyEmail`, but
+**not** in `notifyEscalationComplete`. The mirror has it everywhere. Live also still uses the
+older singular `TEST_OVERRIDE_NUMBER`, which the mirror renamed to the plural array
+`TEST_OVERRIDE_NUMBERS` — that accounts for part of the `CONFIG` and `isTestCaller` deltas.
+
+`getCallTarget` reading 191 characters larger in live is **not** a ladder difference. Both
+sides have `case 1..4`, reference only `JOHN_MCLEAN_PRIMARY` and `ALEX_KOVACHEV`, use only
+those two names, and both carry the test override. It is formatting that a crude
+comment-stripper counted differently.
+
+### Why it does not block the escalation record
+
+All fourteen payload keys `notifyEscalationComplete` sends are present in **live**:
+`agent_id`, `inbound_call_id`, `is_job_created`, `job_number`, `reason`, `outcome_trail`,
+`location_status`, `customer_name`, `service_address`, `from_number`, `call_summary`,
+`timestamp`, `response_call_ids`, `job_result_missing`.
+
+The escalation record depends on `outcome_trail`, `response_call_ids`, `job_number`,
+`is_job_created`, `location_status` and `reason` — every one of them is in the deployed
+script. **No Apps Script change is required for it**, which is what the 2026-08-27 reversal
+concluded, now confirmed against live rather than against the mirror.
+
+### One latent production gap
+
+Live sends no `test_email`, and `src/routes/serviceTrade/escalationComplete.js:140` uses that
+key to divert a test row's client email. Without it, a test emergency would email the real
+client.
+
+**It cannot fire today** — live's `TEST_OVERRIDE_NUMBER` is empty, so no caller is a test
+caller. It becomes live the moment somebody populates it. Whoever does should deploy the
+`notifyEscalationComplete` half of the diversion at the same time.
+
+### Do not blind-paste the mirror into the editor
+
+Pasting `code.gs` wholesale would ship the undeployed test-diversion work into production
+emergency dispatch, unreviewed, as a side effect of an unrelated change. Before editing the
+script, **pull the live content down first** and treat that as the base. The only change
+this repo currently wants in `code.gs` is the corrected header comment, which is cosmetic.
+
+### Correction
+
+The 2026-08-27 entry states Brian Kerr is in neither `CONFIG.CONTACTS` nor `getCallTarget`.
+That was asserted from the mirror. It has now been checked against live and holds — but it
+should have been verified there in the first place, which is the whole point of this entry.
