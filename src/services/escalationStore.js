@@ -131,6 +131,17 @@ async function recordEscalationLeg({
     if (!db) return;
 
     try {
+        // The merge is an UPDATE keyed on inbound_call_id: with no chain row it matches
+        // nothing and the leg vanishes without an error. That is the worst failure this
+        // module can have, because it loses an escalation call that really happened and
+        // reports success. So make sure the row exists first.
+        //
+        // It normally does — the location gate opens it before the first dial — but the
+        // gate can fail to reach us, and it also skips when the inbound call has not yet
+        // landed in call_logs (a different pipeline fills that, so it can lag). By the time
+        // a leg ends, call_logs has usually caught up, which makes this a natural retry.
+        await openEscalationChain({ agentId, inboundCallId, locationStatus });
+
         const { error } = await db.rpc('escalation_merge_leg', {
             p_inbound_call_id: inboundCallId,
             p_leg: {

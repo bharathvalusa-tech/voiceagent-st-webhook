@@ -247,3 +247,91 @@ test('a database error never propagates to the caller', async () => {
         outcomeKey: 'no_answer'
     });
 });
+
+// --- No escalation call may be lost -------------------------------------------------
+//
+// The merge is an UPDATE keyed on inbound_call_id. With no chain row it matches nothing,
+// the leg disappears and the call still reports success — losing a dispatch call that
+// really happened. These cover the paths that used to end that way.
+
+test('a leg arriving before any chain exists opens the chain rather than vanishing', async () => {
+    // The location gate normally opens it first, but the gate can fail to reach us, or it
+    // can have skipped because call_logs had not caught up when it ran.
+    const fake = fakeSupabase({ chainExists: false });
+    const store = loadStore(fake);
+
+    await store.recordEscalationLeg({
+        agentId: OUTBOUND_AGENT,
+        inboundCallId: 'call_inbound_1',
+        outboundCallId: 'call_out_1',
+        outcomeKey: 'no_answer',
+        locationStatus: 'active'
+    });
+
+    assert.strictEqual(fake.calls.inserts.length, 1, 'the chain must be created');
+    assert.strictEqual(fake.calls.inserts[0].row.inbound_call_id, 'call_inbound_1');
+    assert.strictEqual(fake.calls.rpcs.length, 1, 'and the leg still recorded');
+    assert.strictEqual(fake.calls.rpcs[0].args.p_leg.outbound_call_id, 'call_out_1');
+});
+
+test('a leg arriving for an existing chain does not re-create or reset it', async () => {
+    const fake = fakeSupabase({ chainExists: true });
+    const store = loadStore(fake);
+
+    await store.recordEscalationLeg({
+        agentId: OUTBOUND_AGENT,
+        inboundCallId: 'call_inbound_1',
+        outboundCallId: 'call_out_2',
+        outcomeKey: 'declined'
+    });
+
+    assert.strictEqual(fake.calls.inserts.length, 0, 'must not insert a second chain');
+    assert.strictEqual(fake.calls.rpcs.length, 1);
+    for (const u of fake.calls.updates) {
+        assert.ok(!('calls' in u.patch), 'must never overwrite the legs array');
+    }
+});
+
+test('every leg of a multi-call chain is recorded, each with its own id', async () => {
+    // The ladder can run to four attempts. Losing any one of them loses a technician
+    // contact that the office may need to account for.
+    const fake = fakeSupabase({ chainExists: true });
+    const store = loadStore(fake);
+
+    const legs = [
+        ['call_out_1', 'no_answer'],
+        ['call_out_2', 'voicemail'],
+        ['call_out_3', 'no_answer'],
+        ['call_out_4', 'created']
+    ];
+    for (const [id, key] of legs) {
+        await store.recordEscalationLeg({
+            agentId: OUTBOUND_AGENT,
+            inboundCallId: 'call_inbound_1',
+            outboundCallId: id,
+            outcomeKey: key,
+            jobNumber: key === 'created' ? 'J-1' : undefined
+        });
+    }
+
+    const recorded = fake.calls.rpcs.map((r) => r.args.p_leg.outbound_call_id);
+    assert.deepStrictEqual(recorded, ['call_out_1', 'call_out_2', 'call_out_3', 'call_out_4']);
+    assert.strictEqual(new Set(recorded).size, 4, 'each leg keyed by its own call id');
+});
+
+test('a leg is still recorded when the inbound call is not in call_logs yet', async () => {
+    // call_logs is filled by a different pipeline and can lag. The chain cannot be opened
+    // without a tenant, but the attempt must not throw and lose the webhook.
+    const fake = fakeSupabase({ chainExists: false, callLog: null });
+    const store = loadStore(fake);
+
+    await store.recordEscalationLeg({
+        agentId: OUTBOUND_AGENT,
+        inboundCallId: 'call_unknown',
+        outboundCallId: 'call_out_1',
+        outcomeKey: 'no_answer'
+    });
+
+    assert.strictEqual(fake.calls.inserts.length, 0, 'no chain without a resolvable tenant');
+    // The sweep's orphan discovery in clara-lead-agent-server recovers this one from Retell.
+});
