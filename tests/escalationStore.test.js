@@ -181,7 +181,7 @@ test('a leg with no job does not claim one', async () => {
 test('completion writes the sheet trail but never guesses completion_reason', async () => {
     // Telling a decline from an approved-but-failed job needs the terminal leg's outcome
     // key, which the reading side derives. A guess here would fight it.
-    const fake = fakeSupabase();
+    const fake = fakeSupabase({ chainExists: true });
     const store = loadStore(fake);
     const trail = '[26/08 09:15:41] location matched (Four Seasons) — dispatching';
 
@@ -200,6 +200,50 @@ test('completion writes the sheet trail but never guesses completion_reason', as
     assert.strictEqual(patch.escalation_complete, true);
     assert.strictEqual(patch.is_job_created, true, 'the string "true" must coerce');
     assert.ok(!('completion_reason' in patch), 'completion_reason is derived on read');
+});
+
+test('a terminal that never dialled is recorded as a chain with no legs', async () => {
+    // The 45-minute cooldown for automated alarm callers, and a call that ended before a
+    // service address was captured, both end the escalation before the pre-flight gate that
+    // opens the chain. Column AA still says why. This used to be an UPDATE only, so those
+    // outcomes matched zero rows, wrote nothing, and logged success anyway — which is why a
+    // suppressed emergency showed nothing at all on the dashboard.
+    const fake = fakeSupabase({ chainExists: false });
+    const store = loadStore(fake);
+    const trail = '[25/08 14:30:01] no call - within 45-min cooldown (automated caller)';
+
+    await store.completeEscalationChain({
+        agent_id: OUTBOUND_AGENT,
+        inbound_call_id: 'call_inbound_1',
+        reason: 'suppressed_cooldown',
+        outcome_trail: trail
+    });
+
+    assert.strictEqual(fake.calls.updates.length, 0, 'nothing to update');
+    assert.strictEqual(fake.calls.inserts.length, 1);
+
+    const row = fake.calls.inserts[0].row;
+    assert.strictEqual(row.inbound_call_id, 'call_inbound_1');
+    assert.strictEqual(row.inbound_agent_id, 'agent_efbe', 'tenant resolved from call_logs');
+    assert.deepStrictEqual(row.calls, [], 'no dispatch call was placed');
+    assert.strictEqual(row.first_call_at, null);
+    assert.strictEqual(row.outcome_trail, trail);
+    assert.strictEqual(row.escalation_complete, true);
+    assert.ok(!('completion_reason' in row), 'still derived on read');
+});
+
+test('a no-dispatch terminal for a call missing from call_logs writes nothing', async () => {
+    const fake = fakeSupabase({ chainExists: false, callLog: null });
+    const store = loadStore(fake);
+
+    await store.completeEscalationChain({
+        agent_id: OUTBOUND_AGENT,
+        inbound_call_id: 'call_unknown',
+        reason: 'suppressed_cooldown',
+        outcome_trail: 'x'
+    });
+
+    assert.strictEqual(fake.calls.inserts.length, 0, 'no chain without a resolvable tenant');
 });
 
 test('an agent outside the escalation allowlist is never mirrored', async () => {

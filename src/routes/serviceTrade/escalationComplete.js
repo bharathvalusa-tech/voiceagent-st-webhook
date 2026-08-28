@@ -7,6 +7,12 @@ const supabaseService = require('../../services/supabaseService');
 const { completeEscalationChain } = require('../../services/escalationStore');
 
 /**
+ * Reasons that mean "the escalation ended before anyone was dialled". They still carry an
+ * outcome trail worth showing on the dashboard, but there is nothing to tell a client about.
+ */
+const SUPPRESSED_REASONS = new Set(['suppressed_cooldown']);
+
+/**
  * POST /st-escalation-complete
  *
  * The single entry point for the Adaptive Climate consolidated client email.
@@ -110,6 +116,20 @@ router.post('/st-escalation-complete', async (req, res) => {
                 res,
                 { status: 'ignored', reason: 'agent_not_enabled', agent_id: agentId },
                 'Agent is not enabled for escalation emails',
+                200
+            );
+        }
+
+        // Suppressed emergencies mirror to the dashboard but never email the client. The
+        // 45-minute cooldown exists precisely so a burst of alarm-monitor calls does not
+        // reach anyone; sending mail here would defeat it, and the caller is a robot.
+        if (SUPPRESSED_REASONS.has(reason)) {
+            await completeEscalationChain(body);
+            console.log(`[st-escalation-complete] ${callId} suppressed (${reason}) — mirrored, no email`);
+            return sendSuccessResponse(
+                res,
+                { status: 'suppressed', reason, call_id: callId },
+                'Escalation recorded without dispatch; no client email sent',
                 200
             );
         }

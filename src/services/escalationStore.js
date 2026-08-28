@@ -184,6 +184,12 @@ async function recordEscalationLeg({
  * `completion_reason` is deliberately NOT set here: distinguishing a technician declining
  * from an approved-but-failed job needs the terminal leg's outcome key, which the reading
  * side already derives (deriveCompletionReason). Writing a guess here would fight it.
+ *
+ * Inserts the chain when none exists. Not every emergency dials: the 45-minute cooldown for
+ * automated alarm callers and the no-address terminal both end the escalation before the
+ * pre-flight gate that opens the chain, and both record why in column AA. This used to be an
+ * UPDATE only, so those outcomes matched zero rows, wrote nothing, and still logged success —
+ * the reason a suppressed emergency showed nothing at all on the dashboard.
  */
 async function completeEscalationChain(body = {}) {
     const agentId = body.agent_id || body.agentId || '';
@@ -204,6 +210,48 @@ async function completeEscalationChain(body = {}) {
         if (body.job_number) patch.job_number = body.job_number;
         if (body.is_job_created === true || body.is_job_created === 'true') {
             patch.is_job_created = true;
+        }
+
+        // Existence check before the write, the same shape openEscalationChain uses. An UPDATE
+        // that matches nothing is not an error in PostgREST, so without this a terminal that
+        // never dialled wrote nothing and still logged success.
+        const { data: existing, error: existingErr } = await db
+            .from('escalation_chains')
+            .select('inbound_call_id')
+            .eq('inbound_call_id', inboundCallId)
+            .maybeSingle();
+        if (existingErr) throw existingErr;
+
+        if (!existing) {
+            // The escalation ended before the first dial — cooldown suppression, or a call
+            // that never captured a service address. Record it with no legs: the outcome
+            // trail is the whole story, and the dashboard reads chain-level events from it
+            // exactly as it does for a chain that dialled.
+            const { data: call, error: callErr } = await db
+                .from('call_logs')
+                .select('agent_id')
+                .eq('call_id', inboundCallId)
+                .maybeSingle();
+            if (callErr) throw callErr;
+            if (!call) {
+                console.log(`[escalation-store] ${inboundCallId} not in call_logs — skipping chain`);
+                return;
+            }
+
+            const { error: insertErr } = await db.from('escalation_chains').insert({
+                inbound_call_id: inboundCallId,
+                inbound_agent_id: call.agent_id,
+                outbound_agent_id: agentId,
+                calls: [],
+                timeline: [],
+                first_call_at: null,
+                ...patch
+            });
+            if (insertErr) throw insertErr;
+            console.log(
+                `[escalation-store] recorded no-dispatch chain ${inboundCallId} (${body.reason || 'no reason'})`
+            );
+            return;
         }
 
         const { error } = await db
