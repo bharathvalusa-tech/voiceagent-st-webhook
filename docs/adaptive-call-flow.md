@@ -6,6 +6,10 @@
 > mirrored in THIS repo at `google-sheet/code.gs` (gitignored). The Apps Script is
 > deployed separately as a `/exec` web app; it is **not** run from this repo.
 > There is no `vercel-webhook-integration/appscript/` directory — that path was stale.
+>
+> `vercel-webhook-integration/google-sheet/code.gs` is **not** Adaptive's script. It is
+> Braconier's (`SPREADSHEET_ID: '1cbdvP5c-…'`). Adaptive's mirror is the one in this repo,
+> `SPREADSHEET_ID: '1qEOZEKBmZlkRWOM7gwpZcBnpCmL8ip9vnFbXoRAwhfg'`.
 
 ## 1. Pipeline at a glance
 
@@ -71,11 +75,23 @@
 
 ## 2. Inbound leg — creating the row
 
-1. **Retell → main router.** `src/routes/webhook/retell.js` receives the inbound
-   agent's `call_analyzed`. `forwardToApiGateway()` forwards the raw body +
-   `x-retell-signature` to `API_GATEWAY_URL` (the Vercel function) so the
-   signature stays verifiable. Only `call_started` / `call_ended` /
-   `call_analyzed` are forwarded.
+1. **Retell → the Vercel Python app.** The two inbound agents post their post-call
+   webhooks to `vercel-webhook-integration` (`api/adaptiveclimate.py`), confirmed
+   with the account owner 2026-08-28. `forward_to_api_gateway()` (`:594-597`) forwards
+   the raw body + `x-retell-signature` to `API_GATEWAY_URL` — **the AWS API Gateway**
+   (`d4so4tj9h4.execute-api.ap-south-1.amazonaws.com/webhook`) → SQS →
+   `clara-lead-agent-server`, per `.env.local` in both repos. Only `call_started` /
+   `call_ended` / `call_analyzed` are forwarded.
+
+   Corrected 2026-08-28: this step used to say the inbound agent posted to
+   `src/routes/webhook/retell.js` in this repo, and called `API_GATEWAY_URL` "the Vercel
+   function". Both were wrong. This repo's identical `forwardToApiGateway()`
+   (`src/routes/webhook/retell.js:24-56`) is on the **outbound** dispatch agent's path.
+
+   The forward runs *above* the `call_analyzed` filter (`:610`) and the
+   `direction == "outbound"` skip (`:615`), which is why `call_logs` rows exist before
+   `call_analyzed` lands, and why outbound dispatch events reach clara at all — they are
+   dropped there because the outbound agent is not in `user_profiles`.
 2. **Vercel (`api/adaptiveclimate.py`).** `do_POST()`:
    - Processes **only** `call_analyzed`.
    - **WS-4:** if `call.direction == "outbound"`, the event is one of our own
