@@ -10,7 +10,13 @@ const { completeEscalationChain } = require('../../services/escalationStore');
  * Reasons that mean "the escalation ended before anyone was dialled". They still carry an
  * outcome trail worth showing on the dashboard, but there is nothing to tell a client about.
  */
-const SUPPRESSED_REASONS = new Set(['suppressed_cooldown']);
+const SUPPRESSED_REASONS = new Set([
+    'suppressed_cooldown',
+    // Replaying a historical row from the sheet. Same handling — mirror the trail, never mail.
+    // The client was, or was not, told at the time; re-sending months later would be wrong
+    // either way.
+    'suppressed_replay'
+]);
 
 /**
  * POST /st-escalation-complete
