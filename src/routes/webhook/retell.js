@@ -163,7 +163,8 @@ const buildNotificationContext = ({
     callSummary,
     emergencyType,
     isEmergencyFlag,
-    serviceLineId
+    serviceLineId,
+    dynamicVars
 }) => ({
     callId,
     agentId,
@@ -177,6 +178,14 @@ const buildNotificationContext = ({
     emergencyType: emergencyType || null,
     priority: isEmergencyFlag ? 'Emergency' : 'Non-Emergency',
     serviceLineId: serviceLineId || null,
+    // The ServiceTrade record the job was filed against, as distinct from the values above,
+    // which are what the caller SAID. Absent for tenants with no verification step, and the
+    // email omits the card entirely in that case.
+    matchedContactName: dynamicVars?.contactName || dynamicVars?.st_contact_name || null,
+    matchedCompanyName: dynamicVars?.companyName || dynamicVars?.st_company_name || null,
+    matchedLocationName: dynamicVars?.st_location_name || null,
+    matchedLocationAddress: dynamicVars?.st_location_address || null,
+    matchedLocationId: dynamicVars?.locationId || dynamicVars?.st_location_id || null,
     timestamp: call?.start_timestamp || Date.now()
 });
 
@@ -690,6 +699,28 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             return;
         }
 
+        // --- Customer verification verdict (Braconier /st-verify-customer) ---
+        // A caller the account lookup could not verify never gets a job and never gets a
+        // technician. Tenants whose agents do not set the variable read null here and are
+        // untouched — only an explicit false refuses.
+        const existingCustomerFlag = normalizeBool(
+            resolvedDynamicVars?.customerVerified
+            ?? resolvedDynamicVars?.is_existing_customer
+            ?? resolvedDynamicVars?.isExistingCustomer
+            ?? resolvedExtracted?.is_existing_customer
+            ?? resolvedExtracted?.isExistingCustomer
+            ?? resolvedAnalysis?.is_existing_customer
+            ?? resolvedAnalysis?.isExistingCustomer
+        );
+
+        if (existingCustomerFlag === false) {
+            logWithContext('info', 'Caller not verified as an existing customer - no job', {
+                callId,
+                agentId
+            });
+            return;
+        }
+
         // --- Skip non-actionable calls (no job, no email) ---
         const callDurationMs = call?.duration_ms || 0;
         const disconnectionReason = call?.disconnection_reason || '';
@@ -763,7 +794,8 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                     callSummary,
                     emergencyType,
                     isEmergencyFlag: isEmergencyFlagEarly,
-                    serviceLineId
+                    serviceLineId,
+                    dynamicVars: resolvedDynamicVars
                 });
             }
             return await sendNotification({
@@ -897,6 +929,16 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 ? jobConfig.create_emergency_jobs
                 : true;
 
+        // Its non-emergency twin. Defaults true, so a tenant without the column — which is
+        // every tenant until it is added — behaves exactly as before. Braconier sets it false
+        // for the first release: re-keying its ServiceTrade rows to the Main Router switched on
+        // inbound job creation for every actionable call, office-hours ones included, where
+        // there had never been any.
+        const createNonEmergencyJobs =
+            jobConfig && typeof jobConfig.create_non_emergency_jobs === 'boolean'
+                ? jobConfig.create_non_emergency_jobs
+                : true;
+
         // Determine if this call is marked as an emergency.
         // We look in dynamic variables first (highest priority), then extracted data, then analysis.
         const emergencySources = [
@@ -927,12 +969,30 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             callSummary,
             emergencyType,
             isEmergencyFlag,
-            serviceLineId
+            serviceLineId,
+            dynamicVars: resolvedDynamicVars
         });
 
         // If the call is explicitly marked as emergency and config forbids creating emergency jobs,
         // we skip job creation entirely. If Retell doesn't send any emergency flag at all,
         // or sends it as false, we proceed as normal.
+        if (isEmergencyFlag !== true && !createNonEmergencyJobs) {
+            logWithContext('info', 'Non-emergency job creation skipped due to configuration', {
+                callId,
+                agentId,
+                createNonEmergencyJobs,
+                isEmergencyFlag
+            });
+
+            return await sendNotification({
+                outcome: 'job_not_created',
+                details: {
+                    reasonCode: 'non_emergency_jobs_disabled',
+                    reasonMessage: 'Job not created because the call is not an emergency and non-emergency jobs are disabled in configuration'
+                }
+            });
+        }
+
         if (isEmergencyFlag === true && !createEmergencyJobs) {
             logWithContext('info', 'Emergency job creation skipped due to configuration', {
                 callId,
@@ -952,6 +1012,27 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
 
         const authToken = serviceTradeSettings.auth_token;
 
+        // The location /st-verify-customer resolved and the caller confirmed out loud.
+        // Re-deriving it here can only disagree with what Clara already promised them, so
+        // when it is present it is injected as a tier-1 candidate and the matching stack
+        // below is skipped entirely.
+        const inCallLocationId = String(
+            resolvedDynamicVars?.locationId
+            ?? resolvedDynamicVars?.st_location_id
+            ?? resolvedExtracted?.st_location_id
+            ?? ''
+        ).trim();
+        const inCallCandidate = inCallLocationId ? {
+            tier: 1,
+            source: 'in_call',
+            locationId: inCallLocationId,
+            locationName: String(resolvedDynamicVars?.st_location_name || resolvedDynamicVars?.locationName || '').trim(),
+            companyName: String(resolvedDynamicVars?.companyName || resolvedDynamicVars?.st_company_name || '').trim(),
+            address: String(resolvedDynamicVars?.st_location_address || resolvedDynamicVars?.address || '').trim(),
+            contactId: String(resolvedDynamicVars?.contactId || resolvedDynamicVars?.st_contact_id || '').trim(),
+            tierReason: 'location confirmed by the caller during the call'
+        } : null;
+
         const buildSearchData = (phone) => {
             return {
                 phone,
@@ -963,7 +1044,18 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         };
 
         let matchedPhone = callerPhone;
-        let candidates = await findCustomerWithConfidence(authToken, buildSearchData(callerPhone));
+        let candidates = inCallCandidate
+            ? [inCallCandidate]
+            : await findCustomerWithConfidence(authToken, buildSearchData(callerPhone));
+
+        if (inCallCandidate) {
+            logWithContext('info', 'Using the location confirmed on the call - skipping candidate matching', {
+                callId,
+                agentId,
+                locationId: inCallCandidate.locationId,
+                locationName: inCallCandidate.locationName || null
+            });
+        }
 
         // Try fallback phone if primary phone didn't yield tier 1 or tier 2 matches
         const hasTier1or2 = candidates.some(c => c.tier === 1 || c.tier === 2);
@@ -1148,15 +1240,20 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             });
         }
 
-        const candidateValidation = validateCandidateAgainstRetellData({
-            candidate: selectedCandidate,
-            searchContext: {
-                matchedPhone,
-                addressForMatching,
-                companyName,
-                locationName
-            }
-        });
+        // A caller-confirmed location is not re-litigated against the transcript. The
+        // validator compares a candidate with what was *said*, which is the right test for a
+        // fuzzy match and the wrong one here: the caller was read this address and agreed to it.
+        const candidateValidation = selectedCandidate?.source === 'in_call'
+            ? { isValid: true, reason: 'confirmed_in_call', checks: null }
+            : validateCandidateAgainstRetellData({
+                candidate: selectedCandidate,
+                searchContext: {
+                    matchedPhone,
+                    addressForMatching,
+                    companyName,
+                    locationName
+                }
+            });
         if (!candidateValidation.isValid) {
             logWithContext('warn', 'Selected candidate failed Retell data validation', {
                 callId,
@@ -1192,6 +1289,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                 description: jobDescription,
                 callerPhoneNumber: matchedPhone,
                 call_id: callId,
+                primaryContactId: selectedCandidate.contactId || null,
                 techIds: techIds,
                 serviceLineId: serviceLineId,
                 serviceLineIds: serviceLineIds

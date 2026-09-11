@@ -15,6 +15,7 @@ const stCreateServiceRequestRoutes = require('./routes/serviceTrade/createServic
 const stMatchLocationRoutes = require('./routes/serviceTrade/matchLocation');
 const stEscalationCompleteRoutes = require('./routes/serviceTrade/escalationComplete');
 const stInboundLookupRoutes = require('./routes/serviceTrade/inboundLookup');
+const stVerifyCustomerRoutes = require('./routes/serviceTrade/verifyCustomer');
 const stMatchAddressRoutes = require('./routes/serviceTrade/matchAddress');
 const retellWebhookRoutes = require('./routes/webhook/retell');
 const retellOutboundWebhookRoutes = require('./routes/webhook/retellOutbound');
@@ -51,6 +52,7 @@ app.use('/', stCreateServiceRequestRoutes);
 app.use('/', stMatchLocationRoutes);
 app.use('/', stEscalationCompleteRoutes);
 app.use('/', stInboundLookupRoutes);
+app.use('/', stVerifyCustomerRoutes);
 app.use('/', stMatchAddressRoutes);
 app.use('/webhook', retellWebhookRoutes);
 app.use('/webhook', retellOutboundWebhookRoutes);
