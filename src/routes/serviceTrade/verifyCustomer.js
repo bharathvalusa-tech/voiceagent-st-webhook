@@ -227,8 +227,14 @@ const fetchContactSearch = async (authToken, term) => {
 
 // Empty strings rather than omitted keys: Retell renders an ABSENT dynamic variable as a
 // literal {{mustache}} in the prompt, while "" renders as nothing. Every field ships on
-// every response for that reason.
+// every response for that reason — and on the inbound path it matters more, because the
+// prompt reads these before anyone has spoken.
 const baseVars = () => ({
+    // Did the lookup MECHANISM work — not whether it found anybody. False only when we
+    // could not perform a lookup at all. The prompt falls back to the in-call tool on
+    // "false", and must treat a MISSING variable the same way: Retell retries call_inbound
+    // three times and then connects the call with no variables whatsoever.
+    st_lookup_ok: 'true',
     st_customer_verified: 'false',
     st_customer_reason: '',
     st_retry_allowed: 'false',
@@ -255,36 +261,19 @@ const withLocation = (vars, contact, location) => ({
     st_location_address: spokenAddress(location)
 });
 
-router.post('/st-verify-customer', async (req, res) => {
-    const args = readArgs(req.body);
-    const query = req.query || {};
-
-    const agentId = pick(query, 'agent_id') || pick(args, 'agent_id');
-    const spokenLocation = pick(args, 'spoken_location', 'location', 'address');
-    const attempt = Number(pick(args, 'attempt')) === 2 ? 2 : 1;
-
-    // Pass 1 uses the caller ID Retell substituted into the URL. The retry uses the number
-    // the caller stated, which arrives in the body because the model DID have to hear it.
-    const rawTerm = pick(args, 'search') || pick(query, 'from_number');
-
-    const reply = (vars, message, log) => {
-        console.log(`[st-verify-customer] ${JSON.stringify({
-            attempt,
-            reason: vars.st_customer_reason,
-            verified: vars.st_customer_verified,
-            locationId: vars.st_location_id || null,
-            ...log
-        })}`);
-        return sendSuccessResponse(res, vars, message, 200);
-    };
-
+/**
+ * The whole decision, shared by both routes so the in-call tool and the inbound webhook can
+ * never drift apart. Returns { vars, message, log } and NEVER throws — every failure is a
+ * result with a reason, because both callers must answer 200.
+ */
+const resolveCustomer = async ({ agentId, rawTerm, spokenLocation, attempt }) => {
     try {
         if (!agentId) {
-            return reply(
-                { ...baseVars(), st_customer_reason: REASONS.lookupError },
-                'The account system is not reachable right now. Continue the call and let the office follow up.',
-                { error: 'missing agent_id' }
-            );
+            return {
+                vars: { ...baseVars(), st_lookup_ok: 'false', st_customer_reason: REASONS.lookupError },
+                message: 'The account system is not reachable right now. Continue the call and let the office follow up.',
+                log: { error: 'missing agent_id' }
+            };
         }
 
         // ServiceTrade's search returns nothing for an E.164 string — "+13038758807" finds
@@ -293,15 +282,15 @@ router.post('/st-verify-customer', async (req, res) => {
         // the same ten digits. Never trust the caller's format; normalize unconditionally.
         const term = normalizePhone(rawTerm);
         if (term.length !== 10) {
-            return reply(
-                {
+            return {
+                vars: {
                     ...baseVars(),
                     st_customer_reason: REASONS.needsPhone,
-                    st_retry_allowed: attempt === 1 ? 'true' : 'false'
+                    st_retry_allowed: attempt === 2 ? 'false' : 'true'
                 },
-                'Ask the caller for the phone number on their account, then call this again with that number as search.',
-                { rawTerm, normalized: term }
-            );
+                message: 'Ask the caller for the phone number on their account, then call this again with that number as search.',
+                log: { rawTerm, normalized: term }
+            };
         }
 
         const authToken = await getAuthToken(agentId);
@@ -316,23 +305,23 @@ router.post('/st-verify-customer', async (req, res) => {
 
         if (customers.length === 0) {
             const found = parsed.contacts.length > 0;
-            return reply(
-                {
+            return {
+                vars: {
                     ...baseVars(),
                     st_customer_reason: found ? REASONS.companyNotCustomer : REASONS.noContactMatch,
-                    st_retry_allowed: attempt === 1 ? 'true' : 'false'
+                    st_retry_allowed: attempt === 2 ? 'false' : 'true'
                 },
-                attempt === 1
-                    ? 'No customer account matched. Ask once for the phone number on their account, then call this again with that number as search and attempt 2.'
-                    : 'No customer account matched. Tell the caller service is only available during normal business hours and end the call.',
-                { shape: parsed.shape, totalRecords: parsed.totalRecords, contactsFound: parsed.contacts.length }
-            );
+                message: attempt === 2
+                    ? 'No customer account matched. Tell the caller service is only available during normal business hours and end the call.'
+                    : 'No customer account matched. Ask once for the phone number on their account, then call this again with that number as search and attempt 2.',
+                log: { shape: parsed.shape, totalRecords: parsed.totalRecords, contactsFound: parsed.contacts.length }
+            };
         }
 
         // Locations take priority over addresses: resolve against the location entities,
-        // which is what location_extract was already built around. data.addresses[] is only
-        // a lookup table for the parts. Union across matched customer contacts, deduped —
-        // one person can appear twice on a site, and that is not two sites.
+        // which is what location_extract was already built around. data.addresses[] is only a
+        // lookup table for the parts. Union across matched customer contacts, deduped — one
+        // person can appear twice on a site, and that is not two sites.
         const seen = new Set();
         const locations = [];
         customers.forEach((contact) => {
@@ -344,106 +333,222 @@ router.post('/st-verify-customer', async (req, res) => {
             });
         });
 
+        const identity = (c) => ({
+            st_contact_id: String(c.contactId || ''),
+            st_contact_name: c.contactName || '',
+            st_company_id: String(c.companyId || ''),
+            st_company_name: c.companyName || ''
+        });
+
         if (locations.length === 0) {
-            return reply(
-                {
-                    ...baseVars(),
-                    st_customer_reason: REASONS.locationUnresolved,
-                    st_contact_id: String(customers[0].contactId || ''),
-                    st_contact_name: customers[0].contactName,
-                    st_company_id: String(customers[0].companyId || ''),
-                    st_company_name: customers[0].companyName
-                },
-                'The account has no service location on file. Tell the caller service is only available during normal business hours and end the call.',
-                { customers: customers.length }
-            );
+            return {
+                vars: { ...baseVars(), ...identity(customers[0]), st_customer_reason: REASONS.locationUnresolved },
+                message: 'The account has no service location on file. Tell the caller service is only available during normal business hours and end the call.',
+                log: { customers: customers.length }
+            };
         }
 
-        // Exactly one — nothing to disambiguate. Clara reads it back for confirmation.
+        // Exactly one — nothing to disambiguate. The caller still confirms it aloud.
         if (locations.length === 1 && !spokenLocation) {
             const { contact, loc } = locations[0];
-            return reply(
-                {
+            return {
+                vars: {
                     ...withLocation(baseVars(), contact, loc),
                     st_customer_verified: 'true',
                     st_customer_reason: REASONS.needsConfirmation,
                     st_needs_confirmation: 'true'
                 },
-                'Confirm the caller is this contact at this company, then confirm the work is at this location.',
-                { shape: parsed.shape }
-            );
+                message: 'Confirm the caller is this contact at this company, then confirm the work is at this location.',
+                log: { shape: parsed.shape }
+            };
         }
 
         // More than one, and the caller has not named one yet.
         if (!spokenLocation) {
-            return reply(
-                {
+            return {
+                vars: {
                     ...baseVars(),
+                    ...identity(locations[0].contact),
                     st_customer_verified: 'true',
                     st_customer_reason: REASONS.needsLocation,
                     st_needs_location: 'true',
-                    st_contact_id: String(locations[0].contact.contactId || ''),
-                    st_contact_name: locations[0].contact.contactName,
-                    st_company_id: String(locations[0].contact.companyId || ''),
-                    st_company_name: locations[0].contact.companyName,
                     st_location_options: locations.map(({ loc }) => spokenAddress(loc)).join(' | ')
                 },
-                'Ask one open question about which location this is for, then call this again with spoken_location set.',
-                { locationCount: locations.length }
-            );
+                message: 'Ask one open question about which location this is for, then call this again with spoken_location set.',
+                log: { locationCount: locations.length }
+            };
         }
 
-        // ONE fuzzy attempt, as specified. matchAgainstRows scores the spoken location
-        // against every candidate's street/city/state/postal_code. Its own normalizeText
-        // reduces both sides to alphanumerics and spaces, so the four parts joined with
-        // spaces and its internal ", " join produce an identical token stream — no
-        // separate query string has to be built.
+        // ONE fuzzy attempt. matchAgainstRows scores the spoken location against every
+        // candidate's street/city/state/postal_code. Its own normalizeText reduces both sides
+        // to alphanumerics and spaces, so the four parts joined with spaces and its internal
+        // ", " join produce an identical token stream — no separate query string is built.
         //
-        // Anything short of a decisive winner ends the call. A near-miss is not a
-        // tiebreak to re-ask: sending a technician to the wrong building at 2am is worse
-        // than telling the caller to ring back in the morning.
+        // Anything short of a decisive winner ends the call. A near-miss is not a tiebreak to
+        // re-ask: sending a technician to the wrong building at 2am is worse than telling the
+        // caller to ring back in the morning.
         const match = matchAgainstRows(spokenLocation, locations.map(({ loc }) => loc));
 
         if (!match.matched) {
-            return reply(
-                {
+            return {
+                vars: {
                     ...baseVars(),
-                    st_customer_reason: REASONS.locationUnresolved,
-                    st_contact_id: String(locations[0].contact.contactId || ''),
-                    st_contact_name: locations[0].contact.contactName,
-                    st_company_id: String(locations[0].contact.companyId || ''),
-                    st_company_name: locations[0].contact.companyName
+                    ...identity(locations[0].contact),
+                    st_customer_reason: REASONS.locationUnresolved
                 },
-                'The location could not be identified. Do not ask again. Tell the caller service is only available during normal business hours and end the call.',
-                { spokenLocation, matchReason: match.reason, score: match.score ?? null }
-            );
+                message: 'The location could not be identified. Do not ask again. Tell the caller service is only available during normal business hours and end the call.',
+                log: { spokenLocation, matchReason: match.reason, score: match.score ?? null }
+            };
         }
 
         const winner = locations.find(
             ({ loc }) => String(loc.servicetrade_id) === String(match.location.locationId)
         );
 
-        return reply(
-            {
+        return {
+            vars: {
                 ...withLocation(baseVars(), winner.contact, winner.loc),
                 st_customer_verified: 'true',
                 st_customer_reason: REASONS.verified
             },
-            'Location confirmed. Continue with the emergency workflow.',
-            { spokenLocation, score: match.score, runnerUp: match.runnerUp ?? null }
-        );
+            message: 'Location confirmed. Continue with the emergency workflow.',
+            log: { spokenLocation, score: match.score, runnerUp: match.runnerUp ?? null }
+        };
     } catch (error) {
-        // A ServiceTrade outage is NOT a new customer. This reason exists so the prompt can
-        // keep collecting and hand off to the office instead of refusing someone who may
-        // well be a customer — the distinction the unguarded getContacts used to destroy.
-        return reply(
-            { ...baseVars(), st_customer_reason: REASONS.lookupError },
-            'The account system is not reachable right now. Do not refuse the caller. Keep collecting their details and let the office follow up.',
-            { error: error.message || String(error) }
+        // A ServiceTrade outage is NOT a new customer. st_lookup_ok goes false so the prompt
+        // keeps collecting and hands off to the office, rather than refusing someone who may
+        // well be a customer.
+        return {
+            vars: { ...baseVars(), st_lookup_ok: 'false', st_customer_reason: REASONS.lookupError },
+            message: 'The account system is not reachable right now. Do not refuse the caller. Keep collecting their details and let the office follow up.',
+            log: { error: error.message || String(error) }
+        };
+    }
+};
+
+const logResult = (route, result, context) => {
+    console.log(`[${route}] ${JSON.stringify({
+        ...context,
+        reason: result.vars.st_customer_reason,
+        verified: result.vars.st_customer_verified,
+        lookupOk: result.vars.st_lookup_ok,
+        locationId: result.vars.st_location_id || null,
+        ...result.log
+    })}`);
+};
+
+/**
+ * In-call tool. Now a FALLBACK and FOLLOW-UP path only — the inbound webhook below resolves the
+ * account before the agent speaks. This route still serves the two cases that cannot exist
+ * before the caller talks: a number they state, and a location they name. It also serves the
+ * first pass when the inbound webhook failed or never ran.
+ */
+router.post('/st-verify-customer', async (req, res) => {
+    const args = readArgs(req.body);
+    const query = req.query || {};
+    const attempt = Number(pick(args, 'attempt')) === 2 ? 2 : 1;
+
+    const result = await resolveCustomer({
+        agentId: pick(query, 'agent_id') || pick(args, 'agent_id'),
+        // Pass 1 uses the caller ID Retell substituted into the URL. The retry uses the number
+        // the caller stated, which arrives in the body because the model DID have to hear it.
+        rawTerm: pick(args, 'search') || pick(query, 'from_number'),
+        spokenLocation: pick(args, 'spoken_location', 'location', 'address'),
+        attempt
+    });
+
+    logResult('st-verify-customer', result, { attempt });
+    return sendSuccessResponse(res, result.vars, result.message, 200);
+});
+
+// Well inside Retell's 10s budget for call_inbound. The lookup itself measures ~60ms, so this
+// only trips on a genuine ServiceTrade stall — and a stall must not hold up a ringing phone.
+const INBOUND_DEADLINE_MS = 4000;
+
+// Only Braconier's Main Router may drive the inbound route: it resolves against one tenant's
+// ServiceTrade account, and every Braconier call carries the router's agent id for its whole
+// life because agent_swap does not reassign it. Same scoping reason as /st-escalation-complete.
+const inboundAgentIds = new Set(
+    (process.env.INBOUND_VERIFY_AGENT_IDS || 'agent_41010d0d8c1f46cf1d9dfcddbf')
+        .split(',')
+        .map((id) => id.trim().toLowerCase())
+        .filter(Boolean)
+);
+
+const withDeadline = (promise, ms) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('lookup deadline exceeded')), ms))
+]);
+
+/**
+ * POST /st-verify-customer-inbound
+ *
+ * Retell's inbound-call webhook. Fires the moment a call arrives, BEFORE the agent speaks,
+ * and whatever it returns becomes dynamic variables on that call. Configured PER PHONE NUMBER
+ * in the Retell dashboard, not on the agent.
+ *
+ * Retell sends:
+ *   { event: 'call_inbound',
+ *     call_inbound: { agent_id, agent_version, from_number, to_number, custom_sip_headers } }
+ *
+ * Retell expects, within 10s (3 retries, then the call connects with NO variables at all):
+ *   { call_inbound: { dynamic_variables: { ... } } }
+ *
+ * WHY THIS EXISTS. As an in-call tool the same lookup announced "Please stay on the line while
+ * I pull up your account details", waited on a round trip, then re-planned — a whole speech
+ * turn of dead air on an emergency call, for a number Retell already had before the phone
+ * rang. It also removes the {{user_number}} substitution entirely: from_number arrives in the
+ * payload. That is the exact failure that produced {"agent_id":"62","from_number":"+1"} and an
+ * HTTP 400 on call_47f627768c0c44e091d84c12ad8, and it cannot recur where the model supplies
+ * nothing.
+ *
+ * FAIL-OPEN IN EVERY MODE. Unknown agent, missing token, ServiceTrade down, slow lookup — all
+ * return 200 with st_lookup_ok "false" and empty fields, and the agent simply behaves as it
+ * would have without this webhook. It must never stop a call connecting.
+ */
+router.post('/st-verify-customer-inbound', async (req, res) => {
+    const body = req.body || {};
+    const inbound = body.call_inbound || {};
+    const agentId = String(inbound.agent_id || '').trim();
+    const fromNumber = inbound.from_number || '';
+
+    const respond = (vars, log) => {
+        console.log(`[st-verify-customer-inbound] ${JSON.stringify({
+            agentId: agentId || null,
+            reason: vars.st_customer_reason,
+            verified: vars.st_customer_verified,
+            lookupOk: vars.st_lookup_ok,
+            locationId: vars.st_location_id || null,
+            ...log
+        })}`);
+        return res.status(200).json({ call_inbound: { dynamic_variables: vars } });
+    };
+
+    const failOpen = (reason, log) => respond(
+        { ...baseVars(), st_lookup_ok: 'false', st_customer_reason: reason },
+        log
+    );
+
+    try {
+        if (body.event && body.event !== 'call_inbound') {
+            return failOpen(REASONS.lookupError, { skipped: 'unsupported_event', event: body.event });
+        }
+        if (!inboundAgentIds.has(agentId.toLowerCase())) {
+            return failOpen(REASONS.lookupError, { skipped: 'agent_not_enabled' });
+        }
+
+        const result = await withDeadline(
+            resolveCustomer({ agentId, rawTerm: fromNumber, spokenLocation: '', attempt: 1 }),
+            INBOUND_DEADLINE_MS
         );
+        return respond(result.vars, result.log);
+    } catch (error) {
+        // Includes the deadline. A ringing phone will not wait on ServiceTrade.
+        return failOpen(REASONS.lookupError, { error: error.message || String(error) });
     }
 });
 
 module.exports = router;
 module.exports.normalizeContactSearch = normalizeContactSearch;
 module.exports.toSpokenName = toSpokenName;
+module.exports.resolveCustomer = resolveCustomer;
