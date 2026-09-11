@@ -639,28 +639,88 @@ class ServiceTradeService {
 
 
     /**
-     * Check whether the stored PHPSESSID is still valid.
-     * Calls GET /api/auth — returns true (200 OK) or false (401 expired).
+     * Check whether a stored PHPSESSID is still live, and say why when it is not.
+     *
+     * The status codes below were read off the live API on 2026-09-11, because the old
+     * comment ("401 expired") was wrong in a way that mattered:
+     *
+     *   GET /api/auth, dead session     -> 404 {"messages":{"error":["No active session found
+     *                                          for given auth token"]},"data":{"authenticated":false,...}}
+     *   GET /api/location, dead session -> 401, empty body
+     *   POST /api/auth, wrong password  -> 403 {"messages":{"error":["Invalid credentials provided"]}}
+     *
+     * So the expiry signal on THIS endpoint is 404, not 401. Code that only looked for "401"
+     * never recognised an expired session for what it was.
+     *
+     * `data.authenticated` is checked as well as the status: a 200 only proves ServiceTrade
+     * answered, and that flag is the field saying the cookie still maps to a user.
+     *
+     * Anything else - 5xx, a timeout, a DNS failure - returns `expired: false`. That
+     * distinction is the point: a ServiceTrade outage must not read as "the session died",
+     * or every blip burns a login and throws away a perfectly good token.
+     *
+     * @returns {Promise<{valid: boolean, expired: boolean, status: number|null, reason: string|null}>}
      */
-    async validateSession(authToken) {
+    async checkSession(authToken) {
+        const token = (authToken || '').trim();
+        if (!token) {
+            return { valid: false, expired: true, status: null, reason: 'no auth_token stored' };
+        }
+
         try {
             const response = await fetch(`${this.baseUrl}/auth`, {
                 method: 'GET',
                 headers: {
-                    'Cookie': `PHPSESSID=${authToken}`,
+                    'Cookie': `PHPSESSID=${token}`,
                     'Content-Type': 'application/json'
                 }
             });
-            return response.ok;
+
+            const body = await response.json().catch(() => null);
+            const serverMessage = body?.messages?.error?.join('; ') || null;
+
+            if (response.ok && body?.data?.authenticated !== false) {
+                return { valid: true, expired: false, status: response.status, reason: null };
+            }
+
+            if ([401, 403, 404].includes(response.status) || body?.data?.authenticated === false) {
+                return {
+                    valid: false,
+                    expired: true,
+                    status: response.status,
+                    reason: serverMessage || `${response.status} ${response.statusText}`.trim()
+                };
+            }
+
+            return {
+                valid: false,
+                expired: false,
+                status: response.status,
+                reason: serverMessage || `${response.status} ${response.statusText}`.trim()
+            };
         } catch (error) {
             console.error('Error validating ServiceTrade session:', error);
-            return false;
+            return { valid: false, expired: false, status: null, reason: error.message };
         }
     }
 
     /**
-     * Re-authenticate with ServiceTrade using stored credentials.
-     * Returns the new PHPSESSID extracted from the Set-Cookie header.
+     * Boolean form of checkSession, so existing callers are unaffected.
+     */
+    async validateSession(authToken) {
+        const { valid } = await this.checkSession(authToken);
+        return valid;
+    }
+
+    /**
+     * Log in to ServiceTrade and return a fresh PHPSESSID.
+     *
+     * The session id is taken from the response BODY (`data.authToken`) first and from
+     * Set-Cookie only as a fallback. Both carry the same value - checked against all five
+     * credentialed accounts on 2026-09-11 - but Set-Cookie is the fragile one: any proxy or
+     * fetch implementation that drops it turned a successful login into
+     * "no PHPSESSID found in Set-Cookie header", and the account then sat expired until a
+     * person noticed. The body field is documented and survives that.
      */
     async reAuthenticate(username, password) {
         const response = await fetch(`${this.baseUrl}/auth`, {
@@ -669,18 +729,29 @@ class ServiceTradeService {
             body: JSON.stringify({ username, password })
         });
 
+        const raw = await response.text().catch(() => '');
+        let body = null;
+        try { body = JSON.parse(raw); } catch { /* non-JSON body; reported verbatim below */ }
+
         if (!response.ok) {
-            const body = await response.text().catch(() => '');
-            throw new Error(`ServiceTrade re-auth failed: ${response.status} ${response.statusText} ${body}`);
+            // 403 "Invalid credentials provided" is the wrong-password case. It never fixes
+            // itself by retrying, so ServiceTrade's own wording is carried into the alert.
+            const detail = body?.messages?.error?.join('; ') || raw.slice(0, 200);
+            throw new Error(
+                `ServiceTrade re-auth failed: ${response.status} ${response.statusText} ${detail}`.trim()
+            );
         }
 
-        // Extract PHPSESSID from Set-Cookie response header
-        const setCookie = response.headers.get('set-cookie') || '';
-        const match = setCookie.match(/PHPSESSID=([^;]+)/);
-        if (!match) {
-            throw new Error('Re-auth succeeded but no PHPSESSID found in Set-Cookie header');
+        const fromBody = body?.data?.authToken;
+        const fromCookie = (response.headers.get('set-cookie') || '').match(/PHPSESSID=([^;]+)/)?.[1];
+        // Trimmed: one live row is stored with a trailing newline, which then travels into the
+        // Cookie header of every subsequent request.
+        const token = String(fromBody || fromCookie || '').trim();
+
+        if (!token) {
+            throw new Error('ServiceTrade re-auth returned 200 but carried no auth token in the body or Set-Cookie');
         }
-        return match[1];
+        return token;
     }
 }
 module.exports = new ServiceTradeService();

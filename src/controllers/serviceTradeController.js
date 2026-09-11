@@ -1,5 +1,6 @@
 const serviceTradeService = require('../services/serviceTradeService');
 const supabaseService = require('../services/supabaseService');
+const emailNotificationService = require('../services/emailNotificationService');
 const { normalizePhone } = require('../utils/phone');
 
 /**
@@ -13,14 +14,30 @@ const formatUnixToDateTime = (unixTimestamp) => {
 };
 
 /**
- * Get a valid ServiceTrade auth token for an agent.
- * Validates the stored PHPSESSID with GET /api/auth.
- * If expired (401), re-authenticates with stored credentials,
- * persists the fresh token to Supabase, and returns it.
- * @param {string} agentId
- * @returns {Promise<string>} valid PHPSESSID
+ * Establish a usable ServiceTrade session for an agent, healing it if necessary.
+ *
+ * Returns the token plus what had to happen to get it, so callers that want to report on
+ * the heal (the alert email, the scheduled sweep) do not have to infer it from logs.
+ *
+ * Three things force a fresh login, in this order:
+ *
+ *  1. `credentials_fingerprint` is stored and no longer matches st_username/st_password.
+ *     The credentials were edited after this token was minted, so the token belongs to a
+ *     login that no longer exists. It is discarded WITHOUT asking ServiceTrade, because
+ *     the old session can still be perfectly valid — that is the case this catches.
+ *     A NULL fingerprint means "never recorded", which is not the same thing and does not
+ *     force anything; it is backfilled below once the session is proven.
+ *  2. ServiceTrade reports the session expired (404 on GET /auth, per checkSession).
+ *  3. No token is stored at all.
+ *
+ * A ServiceTrade outage (5xx, timeout) is none of those. The stored token is returned
+ * unchanged and the caller's own request decides the outcome — replacing a good token
+ * during an outage is how a blip turns into a dead tenant.
+ *
+ * @returns {Promise<{token: string, outcome: 'valid'|'healed', reason: string|null,
+ *                    status: number|null, previousToken: string|null, agentName: string|null}>}
  */
-const getAuthToken = async (agentId) => {
+const resolveSession = async (agentId) => {
     if (!agentId) throw new Error('agentId is required');
     if (!agentId.includes('agent_')) throw new Error('agentId should start with agent_');
 
@@ -29,25 +46,141 @@ const getAuthToken = async (agentId) => {
         throw new Error('No ServiceTrade token found for this agent');
     }
 
-    const { auth_token, st_username, st_password } = tokenData[0];
+    const row = tokenData[0];
+    return resolveSessionForRow(row);
+};
 
-    // Fast path: session still valid
-    const isValid = await serviceTradeService.validateSession(auth_token);
-    if (isValid) return auth_token;
+/**
+ * resolveSession for a row already in hand. The sweep reads all rows in one query and
+ * calls this directly, so it does not re-fetch each one.
+ */
+const resolveSessionForRow = async (row) => {
+    const agentId = row.agent_id;
+    const agentName = row.Name || null;
+    const { st_username: username, st_password: password } = row;
 
-    // Session expired — re-authenticate if credentials are stored
-    console.log(`⚠️ [${agentId}] Session expired, re-authenticating...`);
-    if (!st_username || !st_password) {
-        throw new Error(
-            `Session expired for agent ${agentId} and no credentials stored. ` +
-            `Update st_username and st_password in servicetrade_tokens to enable auto-reauth.`
-        );
+    // Trimmed on read as well as on write: rows predating the trim in reAuthenticate can
+    // hold a trailing newline, and that character reaches the Cookie header verbatim.
+    const storedToken = (row.auth_token || '').trim();
+
+    const expectedFingerprint = supabaseService.credentialsFingerprint(username, password);
+    const storedFingerprint = row.credentials_fingerprint || null;
+    const credentialsChanged = Boolean(
+        expectedFingerprint && storedFingerprint && storedFingerprint !== expectedFingerprint
+    );
+
+    let check = { valid: false, expired: true, status: null, reason: 'credentials changed since this token was issued' };
+
+    if (!credentialsChanged) {
+        check = await serviceTradeService.checkSession(storedToken);
+
+        if (check.valid) {
+            // Record the proof, and fingerprint the row the first time it is seen so the
+            // NEXT credential edit is detectable.
+            await supabaseService.recordSessionValid(agentId, {
+                username,
+                password,
+                backfillFingerprint: !storedFingerprint
+            });
+            return {
+                token: storedToken,
+                outcome: 'valid',
+                reason: null,
+                status: check.status,
+                previousToken: storedToken,
+                agentName
+            };
+        }
+
+        if (!check.expired) {
+            // ServiceTrade is unreachable or broken, not saying the session is dead.
+            console.warn(`⚠️ [${agentId}] Could not verify the ServiceTrade session (${check.reason}). Using the stored token.`);
+            await supabaseService.markAuthFailure(agentId, 'unverified', check.reason);
+            if (storedToken) {
+                return {
+                    token: storedToken,
+                    outcome: 'valid',
+                    reason: check.reason,
+                    status: check.status,
+                    previousToken: storedToken,
+                    agentName
+                };
+            }
+        }
     }
 
-    const newToken = await serviceTradeService.reAuthenticate(st_username, st_password);
-    await supabaseService.updateAuthToken(agentId, newToken);
-    console.log(`✅ [${agentId}] Re-authenticated successfully, fresh token stored.`);
-    return newToken;
+    console.log(`⚠️ [${agentId}] ServiceTrade session needs renewing — ${check.reason}. Re-authenticating...`);
+
+    if (!username || !password) {
+        const message =
+            `ServiceTrade session expired for agent ${agentId} (${check.status || 'no status'}: ${check.reason}) ` +
+            `and no credentials are stored. Set st_username and st_password in servicetrade_tokens to enable auto-reauth.`;
+        await supabaseService.markAuthFailure(agentId, 'no_credentials', message);
+        await emailNotificationService.sendInternalAlert({
+            agentId,
+            companyName: agentName,
+            errorType: `${check.status || 'session'} — ServiceTrade session expired`,
+            errorMessage: message,
+            session: { oldToken: storedToken, newToken: null, selfHealed: false, statusCode: check.status, reason: check.reason }
+        });
+        throw new Error(message);
+    }
+
+    let newToken;
+    try {
+        newToken = await serviceTradeService.reAuthenticate(username, password);
+    } catch (error) {
+        await supabaseService.markAuthFailure(agentId, 'failed', error.message);
+        await emailNotificationService.sendInternalAlert({
+            agentId,
+            companyName: agentName,
+            errorType: `${check.status || 'session'} — ServiceTrade re-authentication failed`,
+            errorMessage: error.message,
+            session: { oldToken: storedToken, newToken: null, selfHealed: false, statusCode: check.status, reason: check.reason }
+        });
+        throw error;
+    }
+
+    await supabaseService.updateAuthToken(agentId, newToken, { username, password, status: 'healed' });
+    console.log(`✅ [${agentId}] Re-authenticated; fresh session stored.`);
+
+    // The alert an operator actually wants: the session died, here is the status ServiceTrade
+    // gave, here is the token it had and the token it has now, and nobody had to do anything.
+    await emailNotificationService.sendInternalAlert({
+        agentId,
+        companyName: agentName,
+        errorType: credentialsChanged
+            ? 'ServiceTrade credentials changed — session reissued'
+            : `${check.status || 'session'} — ServiceTrade session expired and was renewed`,
+        errorMessage: check.reason || 'Session renewed',
+        session: {
+            oldToken: storedToken,
+            newToken,
+            selfHealed: true,
+            statusCode: check.status,
+            reason: check.reason,
+            credentialsChanged
+        }
+    });
+
+    return {
+        token: newToken,
+        outcome: 'healed',
+        reason: check.reason,
+        status: check.status,
+        previousToken: storedToken,
+        agentName
+    };
+};
+
+/**
+ * Get a valid ServiceTrade auth token for an agent. See resolveSession for the rules.
+ * @param {string} agentId
+ * @returns {Promise<string>} valid PHPSESSID
+ */
+const getAuthToken = async (agentId) => {
+    const { token } = await resolveSession(agentId);
+    return token;
 };
 
 // Calculate timezone offset (minutes) for a given IANA timezone versus UTC at a specific date
@@ -578,6 +711,8 @@ const createJob = async (jobData, agentId) => {
 
 module.exports = {
     getAuthToken,
+    resolveSession,
+    resolveSessionForRow,
     getCustomerByPhone,
     getJobsByLocation,
     getInvoicesByJobId,

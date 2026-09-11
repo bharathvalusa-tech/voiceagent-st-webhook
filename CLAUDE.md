@@ -9,6 +9,10 @@ post-call, and sends the client notification emails.
   must not be quietly reverted.
 - `docs/adaptive-call-flow.md` — the Adaptive Climate escalation contract across all three
   codebases.
+- `docs/servicetrade-session-health.md` — how a ServiceTrade session stays alive: the status
+  codes ServiceTrade really returns (a dead session is **404** on `/auth`, not 401), what
+  forces a fresh login, and the three tenant rows that cannot heal because they have no
+  stored credentials.
 
 ## The thing that catches people out
 

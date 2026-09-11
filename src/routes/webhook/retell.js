@@ -1334,8 +1334,12 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             callId, agentId, error: error.message, stack: error.stack
         });
 
-        const isUnauthorized = /401|unauthorized/i.test(error.message || '');
-        const errorType = isUnauthorized ? '401 Unauthorized' : 'Internal Error';
+        // Shared with the alert email so both agree on what an auth failure looks like.
+        // Matching "401" alone missed the real signal: GET /api/auth answers a dead session
+        // with 404 "No active session found for given auth token", and wrong credentials
+        // come back 403 "Invalid credentials provided".
+        const isUnauthorized = emailNotificationService.isSessionAuthError(error.message);
+        const errorType = isUnauthorized ? 'ServiceTrade session rejected' : 'Internal Error';
         const companyName = serviceTradeSettings?.Name || null;
 
         await Promise.all([
