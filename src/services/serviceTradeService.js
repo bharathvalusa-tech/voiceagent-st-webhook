@@ -36,9 +36,18 @@ class ServiceTradeService {
                     "Content-Type": "application/json"
                 }
             });
-            
+
+            // Mirrors searchContacts below. Without this, a non-200 (or any empty body)
+            // reaches response.json() and throws "Unexpected end of JSON input" — which
+            // surfaces to the caller as an opaque 500 and is indistinguishable from
+            // "this phone number matched nobody". The customer gate has to tell those
+            // two apart, so the failure has to be labelled.
+            if (!response.ok) {
+                throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText}`);
+            }
+
             const { data } = await response.json();
-            return data.contacts.length>0 ? data.contacts[0] : null;
+            return Array.isArray(data?.contacts) && data.contacts.length > 0 ? data.contacts[0] : null;
         } catch (error) {
             console.error('Error fetching contacts from ServiceTrade:', error);
             throw error;

@@ -403,6 +403,14 @@ const buildUnmatchedLocationSection = (details) => {
     return { heading: '⚠️ Address Not On File In ServiceTrade', lines, rows };
 };
 
+// Omitted entirely rather than rendered as five "Not available" rows: a tenant that does not
+// run the verification step should not get a card implying a match was attempted.
+const hasMatchedAccount = (details) => Boolean(
+    details.matchedLocationId
+    || details.matchedContactName
+    || details.matchedCompanyName
+);
+
 const buildBaseSections = (details) => {
     const jobLink = details.jobId ? buildServiceTradeJobLink(details) : null;
 
@@ -434,6 +442,29 @@ const buildBaseSections = (details) => {
                 renderDetailRow('Call ID', details.callId || 'Not available', { monospace: true })
             ]
         },
+        // WHAT THE CALLER SAID vs WHAT WE MATCHED. The Service Location card below is
+        // populated from call-extracted values — the address as spoken, the business name as
+        // spoken. This card is the ServiceTrade record the job was actually filed against.
+        // On one real call the spoken company name and location name came back byte-identical,
+        // because both were simply what the caller said and neither had been checked against
+        // anything. Keeping the two apart is the point.
+        matchedAccountSection: hasMatchedAccount(details) ? {
+            heading: 'Matched in ServiceTrade',
+            lines: [
+                `Contact: ${details.matchedContactName || 'Not available'}`,
+                `Company: ${details.matchedCompanyName || 'Not available'}`,
+                `Location: ${details.matchedLocationName || 'Not available'}`,
+                `Address: ${details.matchedLocationAddress || 'Not available'}`,
+                `Location ID: ${details.matchedLocationId || 'Not available'}`
+            ],
+            rows: [
+                renderDetailRow('Contact', details.matchedContactName || 'Not available'),
+                renderDetailRow('Company', details.matchedCompanyName || 'Not available'),
+                renderDetailRow('Location', details.matchedLocationName || 'Not available'),
+                renderDetailRow('Address', details.matchedLocationAddress || 'Not available'),
+                renderDetailRow('Location ID', details.matchedLocationId || 'Not available', { monospace: true })
+            ]
+        } : null,
         serviceLocationSection: {
             heading: 'Service Location',
             lines: [
@@ -453,6 +484,7 @@ const buildBaseSections = (details) => {
 const composeJobCreatedEmail = (details) => {
     const {
         callerDetailsSection,
+        matchedAccountSection,
         serviceLocationSection,
         callSummarySection,
         jobLink
@@ -485,6 +517,7 @@ const composeJobCreatedEmail = (details) => {
         || buildUnmatchedLocationSection(details);
     const textSections = [
         callerDetailsSection,
+        ...(matchedAccountSection ? [matchedAccountSection] : []),
         serviceLocationSection,
         callSummarySection,
         actionSection,
@@ -511,6 +544,7 @@ const composeJobCreatedEmail = (details) => {
             details,
             cards: [
                 callerDetailsSection,
+                ...(matchedAccountSection ? [matchedAccountSection] : []),
                 serviceLocationSection,
                 callSummarySection,
                 actionCard,
@@ -532,6 +566,7 @@ const composeJobCreatedEmail = (details) => {
 const composeJobNotCreatedEmail = (details) => {
     const {
         callerDetailsSection,
+        matchedAccountSection,
         serviceLocationSection,
         callSummarySection
     } = buildBaseSections(details);
@@ -572,6 +607,7 @@ const composeJobNotCreatedEmail = (details) => {
         || buildUnmatchedLocationSection(details);
     const textSections = [
         callerDetailsSection,
+        ...(matchedAccountSection ? [matchedAccountSection] : []),
         serviceLocationSection,
         callSummarySection,
         actionSection,
@@ -600,6 +636,7 @@ const composeJobNotCreatedEmail = (details) => {
             details,
             cards: [
                 callerDetailsSection,
+                ...(matchedAccountSection ? [matchedAccountSection] : []),
                 serviceLocationSection,
                 callSummarySection,
                 {
