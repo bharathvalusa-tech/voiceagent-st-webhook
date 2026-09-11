@@ -12,24 +12,43 @@ const { loadWithMocks, REPO } = require('./harness');
  * ServiceTrade is the thing that broke in production, so it is checked explicitly.
  */
 
-let handler = null;
+let handler = null;          // POST /st-verify-customer        — the in-call tool
+let inboundHandler = null;   // POST /st-verify-customer-inbound — the call_inbound webhook
 
 const expressStub = () => {
     const stub = () => {};
     stub.Router = () => ({
-        post: (routePath, fn) => { if (routePath === '/st-verify-customer') handler = fn; }
+        post: (routePath, fn) => {
+            if (routePath === '/st-verify-customer') handler = fn;
+            if (routePath === '/st-verify-customer-inbound') inboundHandler = fn;
+        }
     });
     return stub;
 };
 
 const loadRoute = (getAuthToken = async () => 'PHPSESSID-TEST') => {
     handler = null;
+    inboundHandler = null;
     loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/verifyCustomer'), {
         express: expressStub(),
         '../../controllers/serviceTradeController': { getAuthToken }
     });
-    assert.ok(handler, 'route handler was not captured');
+    assert.ok(handler, 'in-call route handler was not captured');
+    assert.ok(inboundHandler, 'inbound route handler was not captured');
     return handler;
+};
+
+const ROUTER_ID = 'agent_41010d0d8c1f46cf1d9dfcddbf';
+
+// Retell's call_inbound envelope in, {call_inbound:{dynamic_variables}} out.
+const invokeInbound = async (callInbound, event = 'call_inbound') => {
+    let captured = null;
+    const res = {
+        status(code) { this._code = code; return this; },
+        json(payload) { captured = { code: this._code, ...payload }; return this; }
+    };
+    await inboundHandler({ body: { event, call_inbound: callInbound } }, res);
+    return captured;
 };
 
 // Captures the URL so the search term can be asserted, and replies with `body`.
@@ -283,4 +302,127 @@ test('args nested under a JSON-string `args` are read the same as at the root', 
         body: { args: JSON.stringify({ attempt: 1, spoken_location: '4820 Nome Street, Denver' }) }
     });
     assert.equal(r.data.st_location_id, '2000000000000001');
+});
+
+// ---- POST /st-verify-customer-inbound ---------------------------------------
+//
+// Retell's call_inbound webhook, configured per phone number. It fires before the agent
+// speaks, and its whole contract is: answer 200 within 10s, or the call connects with no
+// variables at all. So every test here asserts the envelope AND that failure is survivable.
+
+test('inbound: a known caller arrives already resolved, before anyone speaks', async () => {
+    loadRoute();
+    const calls = stubFetch(sideloaded());
+    const r = await invokeInbound({ agent_id: ROUTER_ID, from_number: '+13038758807', to_number: '+17207299614' });
+
+    assert.equal(r.code, 200);
+    const vars = r.call_inbound.dynamic_variables;
+    assert.equal(vars.st_lookup_ok, 'true');
+    assert.equal(vars.st_customer_verified, 'true');
+    assert.equal(vars.st_customer_reason, 'needs_confirmation');
+    assert.equal(vars.st_contact_name, 'Brad Jackson');
+    assert.equal(vars.st_company_name, 'Positive Approach');
+    assert.equal(vars.st_location_id, '1495451569699008');
+    assert.match(calls[0], /[?&]search=3038758807(&|$)/, 'the E.164 caller ID is normalized before it reaches ServiceTrade');
+});
+
+test('inbound: the response is wrapped in Retell call_inbound envelope', async () => {
+    loadRoute();
+    stubFetch(sideloaded());
+    const r = await invokeInbound({ agent_id: ROUTER_ID, from_number: '+13038758807' });
+
+    assert.ok(r.call_inbound, 'must be nested under call_inbound');
+    assert.ok(r.call_inbound.dynamic_variables, 'must be nested under dynamic_variables');
+    assert.equal(typeof r.call_inbound.dynamic_variables, 'object');
+});
+
+test('inbound: every field ships on every response, empty rather than absent', async () => {
+    // Retell renders an ABSENT variable as a literal {{mustache}} in the prompt; "" renders
+    // as nothing. A partial payload would put braces in Clara's mouth.
+    loadRoute();
+    stubFetch(null, { raw: '' });
+    const r = await invokeInbound({ agent_id: ROUTER_ID, from_number: '+13038758807' });
+    const vars = r.call_inbound.dynamic_variables;
+
+    for (const key of ['st_lookup_ok', 'st_customer_verified', 'st_customer_reason',
+        'st_retry_allowed', 'st_needs_confirmation', 'st_needs_location',
+        'st_contact_id', 'st_contact_name', 'st_company_id', 'st_company_name',
+        'st_location_id', 'st_location_name', 'st_location_address', 'st_location_options']) {
+        assert.equal(typeof vars[key], 'string', `${key} must be present as a string`);
+    }
+});
+
+test('inbound: a multi-location caller arrives with the options preloaded', async () => {
+    loadRoute();
+    stubFetch(twoLocations());
+    const vars = (await invokeInbound({ agent_id: ROUTER_ID, from_number: '+13038758807' })).call_inbound.dynamic_variables;
+
+    assert.equal(vars.st_needs_location, 'true');
+    assert.equal(vars.st_location_id, '', 'no location may be chosen before the caller names one');
+    assert.match(vars.st_location_options, /STRONG STREET/);
+    assert.match(vars.st_location_options, /NOME STREET/);
+});
+
+test('inbound: an unknown number still lets the call through, with the retry flagged', async () => {
+    loadRoute();
+    stubFetch(sideloaded({ contacts: [], locations: [], companies: [], totalRecords: 0 }));
+    const vars = (await invokeInbound({ agent_id: ROUTER_ID, from_number: '+14155201480' })).call_inbound.dynamic_variables;
+
+    assert.equal(vars.st_lookup_ok, 'true', 'the lookup worked — it just found nobody');
+    assert.equal(vars.st_customer_verified, 'false');
+    assert.equal(vars.st_retry_allowed, 'true');
+});
+
+// --- fail-open: none of these may stop a call connecting ---
+
+const failsOpen = (label, setup, callInbound = { agent_id: ROUTER_ID, from_number: '+13038758807' }, event) =>
+    test(`inbound fails open: ${label}`, async () => {
+        setup();
+        const r = await invokeInbound(callInbound, event);
+        assert.equal(r.code, 200, 'a webhook that 4xx/5xx would block the call');
+        const vars = r.call_inbound.dynamic_variables;
+        assert.equal(vars.st_lookup_ok, 'false');
+        assert.equal(vars.st_customer_reason, 'lookup_error');
+        assert.equal(vars.st_customer_verified, 'false');
+    });
+
+failsOpen('ServiceTrade returns an empty body', () => { loadRoute(); stubFetch(null, { raw: '' }); });
+failsOpen('ServiceTrade returns 500', () => { loadRoute(); stubFetch(null, { ok: false, raw: '' }); });
+failsOpen('no ServiceTrade token for the agent', () => {
+    loadRoute(async () => { throw new Error('No ServiceTrade token found for this agent'); });
+    stubFetch(sideloaded());
+});
+failsOpen('an agent that is not allowlisted',
+    () => { loadRoute(); stubFetch(sideloaded()); },
+    { agent_id: 'agent_someoneelse', from_number: '+13038758807' });
+failsOpen('a missing agent_id',
+    () => { loadRoute(); stubFetch(sideloaded()); },
+    { from_number: '+13038758807' });
+failsOpen('an event that is not call_inbound',
+    () => { loadRoute(); stubFetch(sideloaded()); },
+    { agent_id: ROUTER_ID, from_number: '+13038758807' }, 'call_analyzed');
+
+test('inbound: a withheld caller ID asks for a number rather than failing', async () => {
+    loadRoute();
+    const calls = stubFetch(sideloaded());
+    const vars = (await invokeInbound({ agent_id: ROUTER_ID, from_number: '' })).call_inbound.dynamic_variables;
+
+    assert.equal(vars.st_customer_reason, 'needs_phone');
+    assert.equal(vars.st_retry_allowed, 'true');
+    assert.equal(calls.length, 0, 'an unusable number must not reach ServiceTrade');
+});
+
+test('inbound and in-call agree — one resolver, two envelopes', async () => {
+    loadRoute();
+    stubFetch(sideloaded());
+    const inbound = (await invokeInbound({ agent_id: ROUTER_ID, from_number: '+13038758807' })).call_inbound.dynamic_variables;
+
+    loadRoute();
+    stubFetch(sideloaded());
+    const inCall = (await invoke({ query: QUERY, body: { attempt: 1 } })).data;
+
+    for (const key of ['st_customer_verified', 'st_customer_reason', 'st_contact_name',
+        'st_company_name', 'st_location_id', 'st_location_address']) {
+        assert.equal(inbound[key], inCall[key], `${key} differs between the two routes`);
+    }
 });

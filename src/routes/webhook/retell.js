@@ -721,6 +721,29 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             return;
         }
 
+        // --- Intake floor ---
+        // A verified customer with a real emergency is still not dispatchable until they have
+        // said WHERE and WHAT. On call_121e51914c88e4c186f810787e7 the post-call analyser wrote
+        // is_emergency TRUE from the words "heavy HVAC emergency" on a 43-second call that
+        // ended in a hangup with no address, no description and no tool calls at all. Only an
+        // explicit false blocks, so tenants that never set it are unaffected.
+        const intakeCompleteFlag = normalizeBool(
+            resolvedDynamicVars?.intakeComplete
+            ?? resolvedDynamicVars?.intake_complete
+            ?? resolvedExtracted?.intake_complete
+            ?? resolvedExtracted?.intakeComplete
+            ?? resolvedAnalysis?.intake_complete
+            ?? resolvedAnalysis?.intakeComplete
+        );
+
+        if (intakeCompleteFlag === false) {
+            logWithContext('info', 'Intake incomplete - no location and/or no issue description - no job', {
+                callId,
+                agentId
+            });
+            return;
+        }
+
         // --- Skip non-actionable calls (no job, no email) ---
         const callDurationMs = call?.duration_ms || 0;
         const disconnectionReason = call?.disconnection_reason || '';
