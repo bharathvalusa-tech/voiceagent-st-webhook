@@ -656,6 +656,28 @@ const composeJobNotCreatedEmail = (details) => {
     };
 };
 
+// A ServiceTrade PHPSESSID is a live credential: anyone holding it is logged in as that
+// tenant's user until it expires. So the alert shows enough to correlate two tokens -
+// first four, last four, length - and not enough to use one. Set
+// ST_ALERT_TOKENS_FULL=true to print them whole, for a debugging session only.
+const maskToken = (token) => {
+    const value = String(token || '').trim();
+    if (!value) return 'none';
+    if (config.alertTokensFull) return value;
+    if (value.length <= 8) return `${'*'.repeat(value.length)} (len ${value.length})`;
+    return `${value.slice(0, 4)}...${value.slice(-4)} (len ${value.length})`;
+};
+
+/**
+ * Does this error message describe a dead or rejected ServiceTrade session?
+ *
+ * Matching on "401" alone missed the real thing. GET /api/auth answers a dead session with
+ * 404 "No active session found for given auth token"; only the other endpoints answer 401.
+ * Wrong credentials come back 403 "Invalid credentials provided". All three are auth
+ * failures and all three belong in the same alert.
+ */
+const isSessionAuthError = (message) => /401|403|404|unauthorized|no active session|session expired|invalid credentials|re-auth/i.test(message || '');
+
 // Recipients of internal error/alert emails, configurable via the
 // INTERNAL_ALERT_RECIPIENTS env var (see src/config/environment.js).
 const INTERNAL_ALERT_RECIPIENTS = config.internalAlertRecipients;
@@ -668,21 +690,54 @@ class EmailNotificationService {
         }
     }
 
-    async sendInternalAlert({ callId, agentId, companyName, errorType, errorMessage }) {
+    /**
+     * Internal alert for a webhook failure or a ServiceTrade session event.
+     *
+     * `session` is optional. When present the email stops being "a token expired, go fix it
+     * by hand" and becomes a record of what the backend already did: the status ServiceTrade
+     * returned, the token that was in the database before, the token that is in it now, and
+     * whether the request went through afterwards. That is the difference between an alert
+     * and a work item.
+     *
+     * @param {object|null} session
+     *   { oldToken, newToken, selfHealed, statusCode, reason, credentialsChanged, verified }
+     */
+    async sendInternalAlert({ callId, agentId, companyName, errorType, errorMessage, session = null }) {
         if (!this.isConfigured) return;
 
-        const isUnauthorized = /401|unauthorized/i.test(errorMessage || '');
-        const subject = isUnauthorized
-            ? `[CLARA ALERT] 401 Unauthorized — ServiceTrade token expired | ${companyName || agentId}`
-            : `[CLARA ALERT] Webhook error — ${errorType || 'Unknown'} | ${companyName || agentId}`;
+        const healed = Boolean(session?.selfHealed);
+        const isUnauthorized = isSessionAuthError(errorMessage) || isSessionAuthError(errorType) || Boolean(session);
+        const statusLabel = session?.statusCode ? `${session.statusCode}` : '401';
+
+        const subject = healed
+            ? `[CLARA RECOVERED] ${statusLabel} ServiceTrade session expired — renewed automatically | ${companyName || agentId}`
+            : isUnauthorized
+                ? `[CLARA ALERT] ${statusLabel} — ServiceTrade session expired, NOT renewed | ${companyName || agentId}`
+                : `[CLARA ALERT] Webhook error — ${errorType || 'Unknown'} | ${companyName || agentId}`;
 
         const timestamp = formatTimestampCentral(Date.now());
+        const row = (label, value) => `<div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">${escapeHtml(label)}</div><div style="font-size:15px;color:#2A2A2A;font-family:monospace;">${escapeHtml(String(value))}</div></div>`;
+
+        const sessionBlockHtml = session
+            ? `<div style="background:${healed ? '#E8F5E9' : '#FFF3CD'};border:1px solid ${healed ? '#4CAF50' : '#FFC107'};border-radius:8px;padding:16px;margin-top:8px;">
+                    <div style="color:#1A1A1A;font-size:14px;font-weight:600;margin-bottom:12px;">${healed ? 'Session renewed by the backend \u2014 no action required' : 'Session could NOT be renewed \u2014 action required'}</div>
+                    ${row('ServiceTrade response', session.statusCode ? `${session.statusCode} \u2014 ${session.reason || 'session rejected'}` : (session.reason || 'session rejected'))}
+                    ${row('Trigger', session.credentialsChanged ? 'st_username / st_password were changed in servicetrade_tokens' : 'stored session no longer accepted by ServiceTrade')}
+                    ${row('auth_token before', maskToken(session.oldToken))}
+                    ${row('auth_token after', maskToken(session.newToken))}
+                    ${row('Written to servicetrade_tokens', healed ? `yes \u2014 auth_token and last_modified updated at ${timestamp}` : 'no \u2014 auth_token left unchanged')}
+                    ${session.verified !== undefined ? row('Verified against ServiceTrade', session.verified ? 'yes \u2014 a live API call returned 200 with the new token' : 'no \u2014 the follow-up API call did not return 200') : ''}
+                    ${healed ? '' : `<div style="font-size:14px;color:#856404;margin-top:8px;">Set <strong>st_username</strong> and <strong>st_password</strong> on this agent's <strong>servicetrade_tokens</strong> row so the next expiry heals itself.</div>`}
+                    ${config.alertTokensFull ? '' : '<div style="font-size:12px;color:#9A9A9A;margin-top:10px;">Tokens are masked (first four, last four, length) because a PHPSESSID is a live login. That is enough to tell two sessions apart.</div>'}
+               </div>`
+            : '';
+
         const html = `
             <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:24px;background:#F5F5F5;">
                 <div style="background:#FFFFFF;border:0.5px solid #EDEDED;border-radius:12px;overflow:hidden;">
                     <div style="background:#FFF3CD;border-bottom:2px solid #FFC107;padding:20px 24px;">
                         <div style="color:#C0112E;font-size:11px;letter-spacing:1px;text-transform:uppercase;font-weight:600;">CLARA.AI — Internal Alert</div>
-                        <div style="color:#1A1A1A;font-size:22px;font-weight:600;margin-top:8px;">⚠ Webhook Processing Error</div>
+                        <div style="color:#1A1A1A;font-size:22px;font-weight:600;margin-top:8px;">${healed ? '✓ ServiceTrade Session Renewed Automatically' : '⚠ Webhook Processing Error'}</div>
                     </div>
                     <div style="padding:24px;">
                         <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Error Type</div><div style="font-size:15px;color:#2A2A2A;">${escapeHtml(errorType || 'Internal Error')}</div></div>
@@ -690,7 +745,7 @@ class EmailNotificationService {
                         <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Company / Agent</div><div style="font-size:15px;color:#2A2A2A;">${escapeHtml(companyName || 'Unknown')} &mdash; <span style="font-family:monospace;">${escapeHtml(agentId || 'N/A')}</span></div></div>
                         <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Call ID</div><div style="font-size:15px;color:#2A2A2A;font-family:monospace;">${escapeHtml(callId || 'N/A')}</div></div>
                         <div style="margin-bottom:14px;"><div style="color:#C0112E;font-size:12px;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Time (Central)</div><div style="font-size:15px;color:#2A2A2A;">${escapeHtml(timestamp)}</div></div>
-                        ${isUnauthorized ? `<div style="background:#FFF3CD;border:1px solid #FFC107;border-radius:8px;padding:12px 16px;margin-top:8px;color:#856404;font-size:14px;">The ServiceTrade session token has expired or is invalid. Please log in to ServiceTrade and update the <strong>auth_token</strong> in Supabase for this agent.</div>` : ''}
+                        ${sessionBlockHtml}
                     </div>
                     <div style="padding:0 24px 20px;color:#9A9A9A;font-size:12px;">
                         <a href="${BRAND_DASHBOARD_URL}" style="color:#C0112E;text-decoration:none;font-weight:500;">CLARA.AI</a> &middot; The Only AI Trades Business Needs
@@ -698,6 +753,20 @@ class EmailNotificationService {
                 </div>
             </div>
         `;
+
+        const sessionBlockText = session
+            ? [
+                '',
+                healed ? 'SESSION RENEWED BY THE BACKEND — no action required.' : 'SESSION COULD NOT BE RENEWED — action required.',
+                `ServiceTrade response: ${session.statusCode ? `${session.statusCode} — ${session.reason || 'session rejected'}` : (session.reason || 'session rejected')}`,
+                `Trigger: ${session.credentialsChanged ? 'st_username / st_password were changed in servicetrade_tokens' : 'stored session no longer accepted by ServiceTrade'}`,
+                `auth_token before: ${maskToken(session.oldToken)}`,
+                `auth_token after:  ${maskToken(session.newToken)}`,
+                `Written to servicetrade_tokens: ${healed ? `yes — auth_token and last_modified updated at ${timestamp}` : 'no — auth_token left unchanged'}`,
+                session.verified === undefined ? '' : `Verified against ServiceTrade: ${session.verified ? 'yes — a live API call returned 200 with the new token' : 'no — the follow-up API call did not return 200'}`,
+                healed ? '' : 'Set st_username and st_password on this agent\'s servicetrade_tokens row so the next expiry heals itself.'
+            ].filter(Boolean).join('\n')
+            : '';
 
         const text = [
             'CLARA.AI — Internal Webhook Alert',
@@ -707,8 +776,9 @@ class EmailNotificationService {
             `Company / Agent: ${companyName || 'Unknown'} — ${agentId || 'N/A'}`,
             `Call ID: ${callId || 'N/A'}`,
             `Time (Central): ${timestamp}`,
-            isUnauthorized ? '\nACTION REQUIRED: ServiceTrade token has expired. Update auth_token in Supabase.' : ''
-        ].join('\n').trim();
+            sessionBlockText,
+            (!session && isUnauthorized) ? '\nACTION REQUIRED: ServiceTrade session has expired. Update auth_token in Supabase.' : ''
+        ].filter(Boolean).join('\n').trim();
 
         try {
             await sgMail.send({
@@ -812,5 +882,9 @@ class EmailNotificationService {
     }
 }
 
-module.exports = new EmailNotificationService();
-
+const emailNotificationService = new EmailNotificationService();
+emailNotificationService.isSessionAuthError = isSessionAuthError;
+emailNotificationService.maskToken = maskToken;
+
+module.exports = emailNotificationService;
+

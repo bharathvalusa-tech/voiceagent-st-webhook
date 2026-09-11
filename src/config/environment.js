@@ -45,6 +45,16 @@ const config = {
     sendgridApiKey: process.env.SENDGRID_API_KEY,
     notificationEmailFrom: process.env.NOTIFICATION_EMAIL_FROM || 'developer@justclara.ai',
     notificationEmailFromName: process.env.NOTIFICATION_EMAIL_FROM_NAME || 'CLARA.AI',
+    // Print ServiceTrade session tokens in full in internal alert emails instead of masked.
+    // Off by default: a PHPSESSID is a live login, and an inbox is not where one belongs.
+    // Turn on only while debugging a specific session, then turn it back off.
+    alertTokensFull: String(process.env.ST_ALERT_TOKENS_FULL || '').toLowerCase() === 'true',
+    // Shared secret the scheduled session sweep (GET/POST /auth/servicetrade/refresh-all)
+    // requires, as `Authorization: Bearer <secret>` or `x-cron-secret`. Vercel Cron sends
+    // the Authorization form automatically once CRON_SECRET is set on the project. Unset
+    // means the route refuses every request rather than running unauthenticated - it can
+    // re-issue every tenant's session, and CORS on this app is wide open.
+    cronSecret: process.env.CRON_SECRET || '',
     nodeEnv: process.env.NODE_ENV || 'development',
     // Adaptive Climates Apps Script /exec URL. The outbound post-call webhook POSTs
     // the job result here (action:'job_update') so the escalation sheet row is
@@ -106,4 +116,4 @@ const config = {
 };
 
 module.exports = config;
-
+
