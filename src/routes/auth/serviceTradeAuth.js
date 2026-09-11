@@ -182,7 +182,7 @@ const runSweep = async (req, res) => {
     console.log(`🔄 ServiceTrade session sweep: ${JSON.stringify(summary)}`);
 
     // One digest, not one email per tenant, and nothing at all when every session was already
-    // valid — an hourly "all fine" is how an alert channel gets muted.
+    // valid — a scheduled "all fine" every run is how an alert channel gets muted.
     const notable = results.filter((r) => r.outcome !== 'valid');
     if (notable.length > 0) {
         await emailNotificationService.sendInternalAlert({

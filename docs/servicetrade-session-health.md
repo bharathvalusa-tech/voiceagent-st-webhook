@@ -63,7 +63,7 @@ Anything else — a 503, a timeout — returns the stored token unchanged and re
 | Trigger | Path | Covers |
 |---|---|---|
 | Any ServiceTrade call this service makes | `getAuthToken(agentId)` → `resolveSession` | every tenant taking live calls; heals inline, the caller never sees the failure |
-| Hourly cron | `GET /auth/servicetrade/refresh-all` (`vercel.json` `crons`) | tenants **not** taking calls — a session that dies overnight is otherwise found by the first caller of the morning |
+| Daily cron, 10:00 UTC | `GET /auth/servicetrade/refresh-all` (`vercel.json` `crons`) | tenants **not** taking calls — a session that dies overnight is otherwise found by the first caller of the morning |
 | By hand, one tenant | `POST /auth/servicetrade/refresh` `{"agent_id":"agent_…"}` | forcing a check |
 | By hand, read-only | `GET /auth/servicetrade/status` | what the database believes; touches ServiceTrade not at all |
 
@@ -71,6 +71,32 @@ The sweep proves each session **twice**: `GET /auth` for the session itself, the
 `GET /location?limit=1` for a real resource. Those are not the same check — a dead session
 answers the first with 404 and the second with 401 — so `/auth` alone leaves the interesting
 half untested.
+
+### Why daily, and what it costs
+
+**Daily because the Vercel plan is Hobby**, which rejects any cron running more than once a
+day: `This cron expression (0 * * * *) would run more than once per day. Upgrade to the Pro
+plan`. 10:00 UTC is 05:00 Central / 06:00 Toronto — after the overnight window, before the
+working day.
+
+Daily is enough because the cron is the *backstop*, not the mechanism. Any tenant taking calls
+heals inline on its next ServiceTrade request, in milliseconds. The sweep exists only for
+tenants that go a long time without one. On Pro, `0 * * * *` is the better setting.
+
+Cost is not a reason to run it less often. Measured on the live account, 8 tenants, one run:
+
+| Call | Size | Count |
+|---|---|---|
+| Supabase `select *` | 20.7 KB | 1 |
+| `GET /api/auth` | 1.4 KB | 8 |
+| `GET /location?limit=1` | 2.1 KB | 5 |
+| `POST /api/auth` | 1.4 KB | 0 steady-state, 5 worst case |
+
+That is ~42 KB per run and almost all of it is **ingress** — responses arriving at the
+function. Vercel bills Fast Data Transfer on bytes leaving its network, and the only thing
+leaving here is the sweep's own JSON reply, ~3 KB. Even hourly that is ~2 MB a month against a
+100 GB allowance. The run is ~13 sequential HTTPS calls and is almost entirely network wait,
+which Fluid Compute does not bill as Active CPU.
 
 `refresh-all` requires `CRON_SECRET`, as `Authorization: Bearer <secret>` or `x-cron-secret`.
 Vercel Cron sends the Authorization form automatically once the env var is set on the project.
@@ -100,8 +126,8 @@ holding it is signed in as that tenant's user. Masking is enough to tell two ses
 which is the only thing the email needs it for. `ST_ALERT_TOKENS_FULL=true` prints them whole,
 for a debugging session and not as a standing setting.
 
-The hourly sweep sends **one digest**, and only when something was not already valid. An
-hourly "all fine" is how an alert channel gets muted.
+The sweep sends **one digest**, and only when something was not already valid. A scheduled
+"all fine" every run is how an alert channel gets muted.
 
 ---
 
