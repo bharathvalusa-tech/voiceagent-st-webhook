@@ -50,9 +50,10 @@ const config = {
     // Turn on only while debugging a specific session, then turn it back off.
     alertTokensFull: String(process.env.ST_ALERT_TOKENS_FULL || '').toLowerCase() === 'true',
     // Shared secret the scheduled session sweep (GET/POST /auth/servicetrade/refresh-all)
-    // requires, as `Authorization: Bearer <secret>` or `x-cron-secret`. Vercel Cron sends
-    // the Authorization form automatically once CRON_SECRET is set on the project. Unset
-    // means the route refuses every request rather than running unauthenticated - it can
+    // requires, as `Authorization: Bearer <secret>` or `x-cron-secret`. The schedule runs on
+    // Supabase pg_cron (db/supabase-servicetrade-session-sweep-cron.sql), which reads the same
+    // value from Vault - the Vercel project is on Hobby and caps crons at one a day. Unset
+    // means the route refuses every request rather than running unauthenticated: it can
     // re-issue every tenant's session, and CORS on this app is wide open.
     cronSecret: process.env.CRON_SECRET || '',
     nodeEnv: process.env.NODE_ENV || 'development',

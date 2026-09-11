@@ -63,7 +63,7 @@ Anything else — a 503, a timeout — returns the stored token unchanged and re
 | Trigger | Path | Covers |
 |---|---|---|
 | Any ServiceTrade call this service makes | `getAuthToken(agentId)` → `resolveSession` | every tenant taking live calls; heals inline, the caller never sees the failure |
-| Daily cron, 10:00 UTC | `GET /auth/servicetrade/refresh-all` (`vercel.json` `crons`) | tenants **not** taking calls — a session that dies overnight is otherwise found by the first caller of the morning |
+| Hourly cron | `POST /auth/servicetrade/refresh-all`, driven by **Supabase pg_cron** (`db/supabase-servicetrade-session-sweep-cron.sql`) | tenants **not** taking calls — a session that dies overnight is otherwise found by the first caller of the morning |
 | By hand, one tenant | `POST /auth/servicetrade/refresh` `{"agent_id":"agent_…"}` | forcing a check |
 | By hand, read-only | `GET /auth/servicetrade/status` | what the database believes; touches ServiceTrade not at all |
 
@@ -72,18 +72,44 @@ The sweep proves each session **twice**: `GET /auth` for the session itself, the
 answers the first with 404 and the second with 401 — so `/auth` alone leaves the interesting
 half untested.
 
-### Why daily, and what it costs
+### Why the schedule lives in Supabase, not in vercel.json
 
-**Daily because the Vercel plan is Hobby**, which rejects any cron running more than once a
-day: `This cron expression (0 * * * *) would run more than once per day. Upgrade to the Pro
-plan`. 10:00 UTC is 05:00 Central / 06:00 Toronto — after the overnight window, before the
-working day.
+The Vercel project is on the **Hobby plan**, which refuses any cron running more than once a
+day:
 
-Daily is enough because the cron is the *backstop*, not the mechanism. Any tenant taking calls
-heals inline on its next ServiceTrade request, in milliseconds. The sweep exists only for
-tenants that go a long time without one. On Pro, `0 * * * *` is the better setting.
+> This cron expression (0 * * * *) would run more than once per day. Upgrade to the Pro plan to
+> unlock all Cron Jobs features.
 
-Cost is not a reason to run it less often. Measured on the live account, 8 tenants, one run:
+pg_cron has no such limit, and this repository already drives `sync-locations` the same way
+(`db/supabase-sync-locations-cron.sql`) — so there is one scheduler and one place to look.
+`vercel.json` carries no `crons` key at all.
+
+The job posts to `https://voiceagent-st-webhook.vercel.app/auth/servicetrade/refresh-all` with
+`Authorization: Bearer <secret>`, read from **Vault** rather than written into the job body:
+`cron.job.command` is readable by anyone who can query that table, and this secret authorises
+re-issuing every tenant's production login. The Vault secret `st_sweep_cron_secret` must equal
+the Vercel env var `CRON_SECRET`.
+
+Hourly, because the cron is the *backstop* and not the mechanism. Any tenant taking calls
+already heals inline on its next ServiceTrade request, in milliseconds. The sweep exists for
+tenants that go a long time without one.
+
+**A job that "succeeded" is not a sweep that ran.** `net.http_post` returns when the request is
+*queued*, so `cron.job_run_details` reports success even on a 401. Check the data instead:
+
+```sql
+select "Name", last_auth_status, last_auth_checked_at, last_auth_error
+  from public.servicetrade_tokens order by last_auth_checked_at desc nulls last;
+
+select id, status_code, content::text from net._http_response order by created desc limit 5;
+```
+
+`401` means the Vault secret and `CRON_SECRET` disagree; `503` means Vercel has no
+`CRON_SECRET` set at all.
+
+### What a run costs
+
+Measured on the live account, 8 tenants, one run:
 
 | Call | Size | Count |
 |---|---|---|
@@ -92,14 +118,15 @@ Cost is not a reason to run it less often. Measured on the live account, 8 tenan
 | `GET /location?limit=1` | 2.1 KB | 5 |
 | `POST /api/auth` | 1.4 KB | 0 steady-state, 5 worst case |
 
-That is ~42 KB per run and almost all of it is **ingress** — responses arriving at the
-function. Vercel bills Fast Data Transfer on bytes leaving its network, and the only thing
-leaving here is the sweep's own JSON reply, ~3 KB. Even hourly that is ~2 MB a month against a
-100 GB allowance. The run is ~13 sequential HTTPS calls and is almost entirely network wait,
-which Fluid Compute does not bill as Active CPU.
+~42 KB per run, and nearly all of it is **ingress** — responses arriving at the function.
+Vercel bills Fast Data Transfer on bytes *leaving* its network, and the only thing leaving here
+is the sweep's own JSON reply, ~3 KB. Hourly that is ~2 MB a month against a 100 GB allowance.
+The run is ~13 sequential HTTPS calls and is almost entirely network wait, which Fluid Compute
+does not bill as Active CPU.
+
+### Authorisation
 
 `refresh-all` requires `CRON_SECRET`, as `Authorization: Bearer <secret>` or `x-cron-secret`.
-Vercel Cron sends the Authorization form automatically once the env var is set on the project.
 **An unset secret closes the route (503), it does not open it** — CORS on this app is `*`, and
 the route can re-issue every tenant's production login.
 
@@ -126,15 +153,19 @@ holding it is signed in as that tenant's user. Masking is enough to tell two ses
 which is the only thing the email needs it for. `ST_ALERT_TOKENS_FULL=true` prints them whole,
 for a debugging session and not as a standing setting.
 
-The sweep sends **one digest**, and only when something was not already valid. A scheduled
-"all fine" every run is how an alert channel gets muted.
+The sweep sends **one digest**, and only when something was not already valid. An hourly "all
+fine" is how an alert channel gets muted.
 
 ---
 
 ## 5. The database
 
-Run `db/servicetrade_tokens_session_health.sql` once in the Supabase SQL editor. Every
-statement is idempotent.
+Two files, both run once in the Supabase SQL editor, both idempotent:
+
+- `db/servicetrade_tokens_session_health.sql` — the columns below.
+- `db/supabase-servicetrade-session-sweep-cron.sql` — the hourly schedule. Needs `CRON_SECRET`
+  set on the Vercel project first, and that same value pasted into the session variable the
+  file's header describes.
 
 | Column | What it is for |
 |---|---|

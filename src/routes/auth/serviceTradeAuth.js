@@ -40,8 +40,10 @@ const probeTestEndpoint = async (authToken) => {
  * opening it — failing shut is the only safe default for something whose failure mode is
  * "anyone on the internet can churn every production login".
  *
- * Vercel Cron sends `Authorization: Bearer $CRON_SECRET` automatically once CRON_SECRET is
- * set on the project; `x-cron-secret` is there for calling it by hand.
+ * The schedule lives in Supabase pg_cron, not vercel.json — the Vercel project is on Hobby,
+ * which caps crons at one a day. db/supabase-servicetrade-session-sweep-cron.sql builds the
+ * Authorization header from a Vault secret that must equal this CRON_SECRET.
+ * `x-cron-secret` is there for calling it by hand.
  */
 const authorizeSweep = (req, res) => {
     if (!config.cronSecret) {
@@ -115,7 +117,7 @@ router.post('/refresh', async (req, res) => {
  * session dying overnight is otherwise found by the first caller of the morning, and the
  * whole point is that no request is ever the one that finds out.
  *
- * GET as well as POST because Vercel Cron issues GET.
+ * POST is what pg_net sends; GET is kept so it can be triggered from a browser or curl.
  */
 const runSweep = async (req, res) => {
     if (!authorizeSweep(req, res)) return;
@@ -182,7 +184,7 @@ const runSweep = async (req, res) => {
     console.log(`🔄 ServiceTrade session sweep: ${JSON.stringify(summary)}`);
 
     // One digest, not one email per tenant, and nothing at all when every session was already
-    // valid — a scheduled "all fine" every run is how an alert channel gets muted.
+    // valid — an hourly "all fine" is how an alert channel gets muted.
     const notable = results.filter((r) => r.outcome !== 'valid');
     if (notable.length > 0) {
         await emailNotificationService.sendInternalAlert({
