@@ -223,8 +223,29 @@ derive it, since all three cases used to read as `no job — tech declined`.
   The tick is deliberately faster than `DELAY_MINUTES` so answer detection and the
   outcome/terminal sheet writes land within ~1 min; the dial spacing is enforced
   separately by `canMakeCall`.
-- **Steps (`getCallTarget`):** 1 = on-call tech (or skip to 3 if none) → 2 = John
-  McLean → 3 = Alex Kovachev → 4 = John McLean. Hard cap `MAX_ESCALATION_ATTEMPTS = 4`.
+- **Steps (`getCallTarget`):** 1-3 = the on-call technician, the **same person** each
+  time, 5 minutes apart → 4 = John McLean → 5 = Alex Kovachev → 6 = John McLean. Hard
+  cap `MAX_ESCALATION_ATTEMPTS = 6`. Worst case an emergency reaches John about 15
+  minutes in and is exhausted around 25.
+
+  The technician gets three rings before anyone else is disturbed: they are the person
+  actually on duty, and one missed call is a phone in a pocket rather than a refusal.
+  With no number for them there is nobody for steps 1-3, so a phoneless row opens at
+  step 4 and can legitimately start at `call4`.
+
+  *(Corrected 2026-09-24: this said four steps, `tech → John → Alex → John`, and that a
+  phoneless row skipped to step 3. Verified against the live `Code.gs`.)*
+- **Test mode (`CONFIG.TEST_OVERRIDE_NUMBERS` / `TEST_OUTBOUND_NUMBER`):** a call
+  arriving **from** a listed number places exactly **one** dispatch call, to
+  `TEST_OUTBOUND_NUMBER`, and the ladder does not run — `maxEscalationAttempts()`
+  returns 1 for a test caller. There is only one test handset, so steps 2-6 would ring
+  it again and teach nothing, and capping at 1 closes the row through the ordinary
+  `exhausted` path instead of leaving it half-open. Everything else behaves normally,
+  so a test still exercises the location gate, both emails and the job. The technician
+  and fallback contacts are never dialled; the row is tagged `[TEST_ROW]` in column AA.
+  `TEST_OUTBOUND_NUMBER` exists so the inbound test line and the outbound test handset
+  can be two different phones — ringing back the phone that just called in gives a busy
+  line and a test that never completes. Production callers are untouched.
 - **Per tick (`processEscalationRowWithEmail`):**
   1. **WS-2 cooldown guard** — for `ALARM_MONITOR_NUMBERS`, if the same number
      already placed a real call within `SAME_NUMBER_COOLDOWN_MINUTES` (45), set
@@ -407,10 +428,37 @@ has RLS enabled with no policy — an anon write is denied outright.
 Writing at each of the three is what makes the timeline fill in **during** a 5-20 minute
 escalation rather than only at the end.
 
-**The gate is what defines "an escalation happened".** Only the first write creates a row.
-Anything that stops earlier — not flagged as an emergency on the call, inside the
-45-minute alarm-monitor cooldown, no service address captured — has no row, and the
-dashboard shows no panel. Intended, not a gap.
+**The gate opens a row for an escalation that dials.** An emergency that stops before it
+— inside the 45-minute alarm-monitor cooldown, or ended before a service address was
+captured — is still an escalation worth showing: the ladder ran and decided not to dial,
+and column AA says why. `completeEscalationChain` inserts a zero-leg chain for those
+(`escalationStore.js`), so the dashboard renders the reason instead of nothing.
+
+Only a call that never reaches the escalation path at all — not flagged as an emergency —
+has no row and no panel.
+
+*(Corrected 2026-09-24: this said a suppressed emergency having no row was "intended, not
+a gap". That stopped being true when the no-dispatch insert landed in `27d046a`.)*
+
+> **Known gap — the deployed Apps Script does not call this for a cooldown suppression.**
+> The webhook is ready and the reason string is recognised, but nothing POSTs. In the
+> deployed `Code.gs`, `doPost`'s cooldown branch sets `make_call=false` and
+> `escalation_complete=true`, appends column AA, and returns — no
+> `notifyEscalationComplete`. `processAllEscalations` only visits rows where
+> `make_call && is_emergency && !escalation_complete`, so the row is never seen again and
+> the `suppressed_cooldown` notify that *does* exist inside
+> `processEscalationRowWithEmail` is unreachable from that path. Net: every
+> cooldown-suppressed emergency still shows nothing on the dashboard.
+>
+> Two further details of the same branch: column AA is appended only when the caller is
+> an alarm monitor, so a human caller suppressed by the cooldown goes terminal with an
+> empty trail — which also puts the row out of reach of `replaySuppressedOutcomes()`,
+> whose filter skips on a missing outcome.
+>
+> The fix is a hand-paste into the Apps Script editor (the mirror under `google-sheet/`
+> is gitignored, so no PR can carry it) — see `google-sheet/COOLDOWN-OUTCOME-PATCH.md`.
+> Deploy this service first: against a webhook that does not know the reason string,
+> every suppressed row emails the client.
 
 **The leg write lives inside `notifySheet`, not at its eight call sites.** That is the one
 place every leg outcome already passes through, so the sheet and the dashboard are written
