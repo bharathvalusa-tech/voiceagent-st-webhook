@@ -544,14 +544,41 @@ const createJob = async (jobData, agentId) => {
         appointmentDateTime = roundTimeUpToQuarter(appointmentDateTime);
         console.log(`📅 Final appointment time in ${resolvedTimeZone}:`, appointmentDateTime.toLocaleString('en-US', { timeZone: resolvedTimeZone }));
 
-        // If caller phone number provided, look up their contact ID
+        // If caller phone number provided, look up their contact ID.
+        //
+        // The contact has to belong to the LOCATION this job is being created against, and
+        // that is not something the phone lookup can promise. The location comes from the
+        // service address; the contact comes from an independent search on the caller's
+        // number. A property manager runs many buildings, each its own ServiceTrade company,
+        // often behind one phone number — so the lookup can legitimately answer with a
+        // contact at a sibling building. ServiceTrade then rejects the whole job:
+        //
+        //   400 {"validation":{"primaryContactId":{"invalidModel":"'1431973455298817' is not valid"}}}
+        //
+        // which is how one approved emergency ended with no job at all on 2026-09-24.
+        // getCustomerByPhone already returns the contact's locations, so the check costs no
+        // extra call. A contact that does not cover this location is dropped and the block
+        // below falls back to the location's own primary contact, which is valid by
+        // construction.
         let callerContactId = primaryContactId;
         if (callerPhoneNumber && !primaryContactId) {
             try {
                 console.log('📞 Looking up caller contact ID for phone:', callerPhoneNumber);
                 const callerData = await getCustomerByPhone(callerPhoneNumber, agentId);
-                callerContactId = callerData.customerId || null;
-                console.log('✅ Found caller contact ID:', callerContactId);
+                const candidateId = callerData.customerId || null;
+                const coversLocation = Array.isArray(callerData.locations)
+                    && callerData.locations.some((loc) => String(loc?.id) === String(locationId));
+
+                if (candidateId && !coversLocation) {
+                    console.log(
+                        `⚠️ Contact ${candidateId} is not attached to location ${locationId} `
+                        + `(it covers ${JSON.stringify((callerData.locations || []).map((l) => l.id))}) `
+                        + '— ignoring it so ServiceTrade does not reject the job'
+                    );
+                } else {
+                    callerContactId = candidateId;
+                    console.log('✅ Found caller contact ID:', callerContactId);
+                }
             } catch (error) {
                 console.log('⚠️ Could not find caller contact ID:', error.message);
                 // Continue without primary contact
