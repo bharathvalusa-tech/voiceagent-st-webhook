@@ -1,3 +1,29 @@
+const { normalizePhone } = require('../utils/phone');
+
+/**
+ * What to put in `GET /contact?search=` when searching by phone.
+ *
+ * ServiceTrade's contact search matches the digits of a stored number, and the numbers we
+ * hold are E.164 (`+14163233172`) while ServiceTrade stores them formatted
+ * (`(416) 323-3172`). Two things then go wrong at once:
+ *
+ *   - `+` is a space once the query string is decoded, so an un-encoded `+1416...` reaches
+ *     the API as ` 1416...` and matches nobody;
+ *   - even encoded, the `1` country code prefix does not match a stored 10-digit number.
+ *
+ * Verified against the live API for one Adaptive caller: `+14163233172` and `14163233172`
+ * both return 0 contacts, `4163233172` returns the right person. So the search term is the
+ * national 10-digit form, and the caller URL-encodes it.
+ *
+ * Anything that is not a phone number is passed through untouched — normalizePhone would
+ * reduce a name to an empty string.
+ */
+const contactSearchTerm = (value) => {
+    const raw = String(value || '').trim();
+    const national = normalizePhone(raw);
+    return national.length === 10 ? national : raw;
+};
+
 class ServiceTradeService {
     constructor() {
         this.baseUrl = 'https://api.servicetrade.com/api';
@@ -29,7 +55,7 @@ class ServiceTradeService {
     async getContacts(authToken, phoneNumber) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
-            const response = await fetch(`${this.baseUrl}/contact?search=${phoneNumber}`, {
+            const response = await fetch(`${this.baseUrl}/contact?search=${encodeURIComponent(contactSearchTerm(phoneNumber))}`, {
                 method: "GET",
                 headers: {
                     "Cookie": cookieValue,
@@ -497,22 +523,41 @@ class ServiceTradeService {
                 return { response, responseText };
             };
 
-            let { response, responseText } = await postJob(basePayload);
+            const rejectedField = (text, field) => {
+                try {
+                    return Boolean(JSON.parse(text)?.messages?.validation?.[field]);
+                } catch (_) {
+                    return false; // not JSON
+                }
+            };
+
+            let payload = basePayload;
+            let { response, responseText } = await postJob(payload);
 
             // Fallback: if ServiceTrade rejects the supplied vendorId as not-found,
             // retry once without vendorId so a stale/wrong config does not block job creation.
-            if (!response.ok && basePayload.vendorId) {
-                let isVendorIdError = false;
-                try {
-                    const parsed = JSON.parse(responseText);
-                    isVendorIdError = Boolean(parsed?.messages?.validation?.vendorId);
-                } catch (_) { /* not JSON, leave false */ }
+            if (!response.ok && payload.vendorId && rejectedField(responseText, 'vendorId')) {
+                console.warn(`⚠️ vendorId ${payload.vendorId} rejected by ServiceTrade; retrying without vendorId`);
+                const { vendorId, ...withoutVendor } = payload;
+                payload = withoutVendor;
+                ({ response, responseText } = await postJob(payload));
+            }
 
-                if (isVendorIdError) {
-                    console.warn(`⚠️ vendorId ${basePayload.vendorId} rejected by ServiceTrade; retrying without vendorId`);
-                    const { vendorId, ...payloadWithoutVendor } = basePayload;
-                    ({ response, responseText } = await postJob(payloadWithoutVendor));
-                }
+            // Same treatment for primaryContactId, and for a stronger reason: it is pure
+            // enrichment. The job is who, where and what is broken; the contact is a name to
+            // ring back. ServiceTrade rejects a contact that is not attached to this job's
+            // location, and on the escalation path that 400 threw away a job a technician had
+            // already approved — the caller waits, and nobody finds out until the internal
+            // alert lands.
+            //
+            // The mismatch itself is prevented upstream (serviceTradeController scopes the
+            // contact to the location). This is the net under it: whatever else is wrong, a
+            // job with no primary contact beats no job.
+            if (!response.ok && payload.primaryContactId && rejectedField(responseText, 'primaryContactId')) {
+                console.warn(`⚠️ primaryContactId ${payload.primaryContactId} rejected by ServiceTrade; retrying without it`);
+                const { primaryContactId, ...withoutContact } = payload;
+                payload = withoutContact;
+                ({ response, responseText } = await postJob(payload));
             }
 
             if (!response.ok) {
