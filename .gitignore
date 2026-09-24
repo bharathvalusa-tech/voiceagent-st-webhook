@@ -151,3 +151,7 @@ vite.config.ts.timestamp-*
 #google- sheet work
 google-sheet/
 .DS_Store
+
+# Claude-managed working notes: Braconier dispatch specs carry customer names,
+# site addresses and caller numbers. This repository is public.
+.claude/
