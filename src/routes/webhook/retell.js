@@ -8,6 +8,8 @@ const { createJob } = require('../../controllers/serviceTradeController');
 const emailNotificationService = require('../../services/emailNotificationService');
 const { disambiguateLocations } = require('../../services/gptDisambiguationService');
 const supabaseService = require('../../services/supabaseService');
+const { resolveCustomerVerdict } = require('../../services/customerVerdictService');
+const { resolveCustomer, verifyAgentIds } = require('../serviceTrade/verifyCustomer');
 const router = express.Router();
 
 const processedCalls = new Map();
@@ -602,6 +604,10 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         let resolvedExtracted = extracted || {};
         let resolvedAnalysis = analysis || {};
         let resolvedDynamicVars = dynamicVars || {};
+        // Set by the verification gate below, read by the location-matching stack ~300 lines
+        // on. A location id recovered there is the one the caller was verified against, so it
+        // must reach job creation rather than being re-derived from a transcribed address.
+        let healedLocationId = '';
         let extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis, resolvedDynamicVars);
 
         const needsRetellFetch =
@@ -703,7 +709,29 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         // A caller the account lookup could not verify never gets a job and never gets a
         // technician. Tenants whose agents do not set the variable read null here and are
         // untouched — only an explicit false refuses.
-        const existingCustomerFlag = normalizeBool(
+        //
+        // THE ANALYSER IS THE LAST SOURCE, NOT THE FIRST. It reads a transcript and infers;
+        // on call_a20a1973331d6d375307e080089 it inferred `is_existing_customer: false` for a
+        // caller the pre-greeting lookup had verified before the agent said hello, and a
+        // sewer overflow got no work order. `resolveCustomerVerdict` asks what actually
+        // happened first — the stored caller_details, the lookup's own responses, the
+        // pre-greeting variables — and asks ServiceTrade again by caller ID when all three
+        // are silent. It returns null when it has no evidence, and the old chain below then
+        // behaves exactly as it did before, which is every Adaptive call.
+        const verdict = await resolveCustomerVerdict({
+            call,
+            dynamicVars: resolvedDynamicVars,
+            agentId,
+            allowLookup: verifyAgentIds.has(String(agentId || '').trim().toLowerCase()),
+            // Only read when the search reports several sites and names none, to resolve
+            // which one — the in-call fuzzy match the agent skipped on row 745.
+            spokenLocation: rawAddress || '',
+            verify: resolveCustomer
+        });
+
+        healedLocationId = verdict.locationId;
+
+        const existingCustomerFlag = verdict.verified ?? normalizeBool(
             resolvedDynamicVars?.customerVerified
             ?? resolvedDynamicVars?.is_existing_customer
             ?? resolvedDynamicVars?.isExistingCustomer
@@ -713,10 +741,24 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             ?? resolvedAnalysis?.isExistingCustomer
         );
 
+        logWithContext('info', 'Customer verification verdict', {
+            callId,
+            agentId,
+            verdictSource: verdict.source,
+            verdictVerified: verdict.verified,
+            verdictLocationId: verdict.locationId || null,
+            postCallSearchRan: verdict.searched,
+            analyserSaid: normalizeBool(
+                resolvedExtracted?.is_existing_customer ?? resolvedAnalysis?.is_existing_customer
+            ),
+            effective: existingCustomerFlag
+        });
+
         if (existingCustomerFlag === false) {
             logWithContext('info', 'Caller not verified as an existing customer - no job', {
                 callId,
-                agentId
+                agentId,
+                verdictSource: verdict.source
             });
             return;
         }
@@ -1039,12 +1081,21 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         // Re-deriving it here can only disagree with what Clara already promised them, so
         // when it is present it is injected as a tier-1 candidate and the matching stack
         // below is skipped entirely.
-        const inCallLocationId = String(
-            resolvedDynamicVars?.locationId
-            ?? resolvedDynamicVars?.st_location_id
-            ?? resolvedExtracted?.st_location_id
-            ?? ''
-        ).trim();
+        //
+        // `healedLocationId` is the same id read off a source the agent never had to touch —
+        // a lookup response in the transcript, or the pre-greeting variables. It is last
+        // because the mid-call values are what the caller heard read back; it is here at all
+        // because on a call where the agent skipped its branches they are the only copy.
+        //
+        // First NON-EMPTY, not first non-null: Retell ships an unresolved variable as "",
+        // never as absent, so `??` would stop on the empty string and never reach the source
+        // that actually holds the id.
+        const inCallLocationId = [
+            resolvedDynamicVars?.locationId,
+            resolvedDynamicVars?.st_location_id,
+            resolvedExtracted?.st_location_id,
+            healedLocationId
+        ].map((v) => String(v ?? '').trim()).find(Boolean) || '';
         const inCallCandidate = inCallLocationId ? {
             tier: 1,
             source: 'in_call',

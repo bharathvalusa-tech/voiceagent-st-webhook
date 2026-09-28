@@ -552,3 +552,8 @@ module.exports = router;
 module.exports.normalizeContactSearch = normalizeContactSearch;
 module.exports.toSpokenName = toSpokenName;
 module.exports.resolveCustomer = resolveCustomer;
+// One allowlist, two consumers. `/webhook/retell` re-runs this same lookup after the call
+// so the job path never depends on the agent having asked, and it must not do that for an
+// agent whose id has no ServiceTrade credential row — `resolveCustomer` logs in as that
+// agent's tenant.
+module.exports.verifyAgentIds = inboundAgentIds;
