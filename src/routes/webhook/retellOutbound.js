@@ -473,7 +473,16 @@ router.post('/retell-outbound', async (req, res) => {
                 service_address: vars.customer_address || vars.service_address,
                 from_number: vars.from_number || vars.fromNumber,
                 call_summary: vars.call_summary || vars.callSummary,
-                call_id: callId
+                call_id: callId,
+                // The location the caller confirmed on the INBOUND call, carried into this
+                // outbound call by GAS alongside inbound_call_id. When present it settles
+                // the location outright instead of re-deriving one from the transcribed
+                // address — the same rule the pre-flight gate now applies, so the gate
+                // verdict and the created job still cannot drift.
+                //
+                // Absent on any row GAS wrote before it carried the column, and on any call
+                // where nothing resolved. Then the matcher runs exactly as it does today.
+                location_id: vars.st_location_id || vars.location_id || ''
             });
         } catch (createErr) {
             console.error(`[retell-outbound] job creation threw for call ${callId}: ${createErr.message || createErr}`);

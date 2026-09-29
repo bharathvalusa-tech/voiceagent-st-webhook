@@ -624,6 +624,186 @@ Found and fixed while doing this. Recorded so the same wrong beliefs do not retu
 
 ---
 
+## Session 2026-09-22 — the Braconier contact search, ported to Adaptive
+
+Adaptive's pre-greeting lookup used the location phone index alone; Braconier's used a
+sideloaded contact search alone. Each is blind to something the other sees. Both now run on
+both paths, and the location the caller confirms is carried toward job creation.
+
+### 1. Contact search dominates; the location table is the fallback
+
+`/contact?search=` **cannot see a location's own main line.** `Location.phoneNumber` lives
+on the location, not on any contact, so a caller ringing their own front desk is invisible
+to contact search. That is why `src/services/locationPhoneIndex.js` exists (`:9-14`).
+
+The index **cannot see who is calling.** It indexes four phone fields and stores location
+rows; there is no contact id, name or company on it. An index-only lookup leaves the agent
+asking a known customer for their name.
+
+**Decision (owner's call, 2026-09-22): precedence, not a union.** A ten-digit hit on a
+contact means a person on the account, and that contact's locations are the sites they call
+about. When contact search yields a location the search is over — the index is not consulted
+for a second opinion and cannot overturn it. The index runs only when contact search
+produced no location at all.
+
+Both requests still fire in parallel (`inboundLookup.js:130`). The index answer is usually
+discarded, but waiting for the contact search to fail first would put a cold rebuild
+(~800ms) in series inside a 4s deadline on a ringing phone.
+
+**The trade-off was raised and kept.** A number on ONE contact resolves even when the same
+number is also the main line of other sites — the contact's location wins and the others are
+never seen. `customerMatchingService.js:554-562` refuses exactly that shape at job-matching
+time. This route disagrees on purpose: its verdict is advisory, read back to the caller for
+confirmation, and the authoritative match still runs after the call. **Do not "fix" this
+into a union** — it was built as a union first and changed to precedence deliberately.
+
+Contact identity is independent of all of it: when contact search names the caller, that
+name ships even when the location came from the index.
+
+### 2. Ambiguity is now a question, not a discard
+
+Before: a number on several locations returned `st_location_found: "false"` and nothing else
+— the call proceeded as if the number were unknown.
+
+After: `st_needs_location: "true"` and `st_location_options` carries the spoken addresses.
+The agent asks which site and calls `/st-verify-customer` with `spoken_location`, which
+scores it with `addressMatchService.matchAgainstRows`.
+
+### 3. `/st-verify-customer` stays Braconier-only — reverted
+
+Adaptive was briefly put on that route behind a `tenantPolicy()` (different auth row, no
+`company.customer` gate, location index unioned in). **Reverted the same session on the
+account owner's correction:** Adaptive has no in-call lookup tool at all. Everything the
+agent knows about the caller's location arrives in the `call_inbound` response, before
+anyone speaks.
+
+`src/routes/serviceTrade/verifyCustomer.js` is back to its HEAD behaviour apart from the
+shared-search extraction in item 5. Do not re-add a tenant policy there without checking
+this first — it looks like an obvious generalisation and it is not wanted.
+
+**What that costs.** An ambiguous number cannot be resolved to a location id during the
+call. `st_needs_location` / `st_location_options` still ship, so the agent asks *which*
+site rather than asking for the address from scratch; the caller's answer travels out as
+the spoken service address and `matchLocationFromCallContext` matches it after the call,
+exactly as a freely-spoken address would. Nothing in-call resolves an id.
+
+### 4. The confirmed location id now reaches job creation — webhook side only
+
+`matchLocationFromCallContext` accepts `location_id`, reads `GET /location/{id}` and returns
+that verdict outright (`src/services/contextJobService.js:22`). Re-deriving from a
+transcribed address can only agree with what Clara already promised the caller, or
+contradict it.
+
+**Decision: a confirmed id can never LOSE a dispatch.** A failed or unknown read logs and
+falls back to the full matcher rather than returning `no_match`.
+
+**Not wired end to end.** The id travels Retell → `api/adaptiveclimate.py` → sheet → GAS →
+`/st-match-location`, and neither the Python app nor GAS carries it yet. Today the field is
+always absent and every call matches the hard way — nothing regressed, nothing improved on
+that leg. Unapplied hunks for both, written against the current files:
+
+- `.claude/patches/gas-location-id.md` — new sheet column `AE`, `addDataToSheet`,
+  `updateCapturedData`, `matchesServiceTradeLocation`, `makeRetellCall` and its four call
+  sites. Requires adding the `AE` header to the live sheet first, and
+  `st_location_id` to the outbound agent's `default_dynamic_variables` — an unset Retell
+  variable renders as the literal `{{st_location_id}}`, which would be sent as an id.
+- `.claude/patches/python-location-id.md` — `extract_variables_v4` reads
+  `collected_dynamic_variables` then `retell_llm_dynamic_variables` (the pre-greeting
+  webhook's return lands in the SECOND one, which that file never reads today), rejects
+  anything non-numeric, and `send_to_google_sheets_v4` ships it.
+
+`.claude/` is untracked in this repo, so those two files are on this machine only.
+
+### 5. Shared code, and a behaviour change worth knowing
+
+`normalizeContactSearch` / `fetchContactSearch` moved out of `verifyCustomer.js` into
+`src/services/contactSearchService.js`. Two tenants now need the same undocumented
+sideloaded-shape tolerance, and two copies would drift the moment ServiceTrade renames a
+field.
+
+**The inbound lookup no longer re-checks the caller's digits against
+`contact.phone / mobile / alternatePhone`.** On live records `phone` is routinely `""` with
+the number in `mobile`, and a field outside those three is invisible — so the check could
+reject the very record the ten-digit search had just returned. Same reasoning
+`verifyCustomer.js` already applied. The search term IS the phone.
+
+### 6. Numbers in the comments disagree — measure before trusting either
+
+`docs/adaptive-call-flow.md` says 204 distinct numbers / 160 unambiguous.
+`customerMatchingService.js:547` says 110 distinct / 19 ambiguous.
+`locationPhoneIndex.js:130` says `primaryContact` adds 107 distinct numbers on top of the
+flat columns. These cannot all be current. Nothing in this change depends on them, but any
+estimate of "how many callers would contact search alone lose" must re-measure first.
+
+### Verification
+
+`npm test` — 168 pass, 0 fail. `npm run build:syntax` and `npm run build:smoke` pass.
+New coverage: `tests/confirmedLocation.test.js` (confirmed-id short-circuit and its
+fallbacks), the both-sources cases in `tests/service.test.js`, and the Adaptive-vs-Braconier
+tenant assertions in `tests/verifyCustomer.test.js`.
+
+### 7. A two-number test mode in the Apps Script
+
+`google-sheet/code.gs` had one test knob, `TEST_OVERRIDE_NUMBERS`, and it dialled the test
+caller's **own** number back. That cannot be answered: the handset that placed the call is
+busy, so the dispatch call never completes and the test stops at the first ring.
+
+Split into a pair:
+
+| Knob | Meaning |
+|---|---|
+| `CONFIG.TEST_OVERRIDE_NUMBERS` | inbound. A call FROM one of these is a test run |
+| `CONFIG.TEST_OUTBOUND_NUMBER` | the phone that is RUNG for such a call. Empty → rings the caller back, the old behaviour |
+
+`TEST_OUTBOUND_NUMBER` is only ever dialled for a `TEST_OVERRIDE_NUMBERS` caller. Setting it
+alone changes nothing.
+
+**The ladder is off for a test row.** `maxEscalationAttempts(fromNumber)` returns 1 for a
+test caller and `MAX_ESCALATION_ATTEMPTS` (4) for everyone else. Steps 2-4 exist to reach a
+*different* person each time, and in test mode every step dials the same handset — so the
+cap also means the row closes through the ordinary "exhausted" path rather than stalling
+half-open with `make_call` still true. The outcome reads `🧪 TEST_ROW — single test call not
+answered; escalation ladder is disabled for test callers`.
+
+Everything else about a test row is unchanged: the location gate runs, the technician and
+client emails divert to `TEST_NOTIFICATION_EMAIL`, and the ServiceTrade job summary is
+prefixed `[TEST]`.
+
+Covered by five cases in `tests/appsScript.test.js`, including a real-caller control that
+asserts a non-test number still reaches the actual technician. **This lands in a gitignored
+file** — `google-sheet/code.gs` reaches production only by being pasted into the Apps Script
+editor.
+
+### 8. The ladder is six steps now, and the technician gets three of them
+
+| Step | Who | Was |
+|---|---|---|
+| 1, 2, 3 | the **same** on-call technician | step 1 only |
+| 4 | John McLean | step 2 |
+| 5 | Alex Kovachev | step 3 |
+| 6 | John McLean | step 4 |
+
+`MAX_ESCALATION_ATTEMPTS` 4 → 6. `DELAY_MINUTES` was already 5 and is unchanged, so John
+is first rung around 15 minutes in and the chain exhausts around 25.
+
+**Why three tries on one person.** They are the technician actually on duty. One unanswered
+call is a phone in a pocket, not a refusal, and the old ladder handed the emergency to a
+manager after a single miss.
+
+**A phoneless row now opens at step 4, not step 3.** Steps 1-3 are the technician; with no
+number for them there is nobody to ring three times. `getCallTarget` keeps a defensive John
+fallback on steps 1-3 so a phoneless row that somehow reaches them rings someone instead of
+returning null and stalling.
+
+**Known limit, not fixed.** The sheet has three call-id columns (T/U/V) for six steps. Calls
+1-3 fill them; calls 4, 5 and 6 all overwrite V, so the client-email timeline keeps only the
+last. Two transcripts per fully-exhausted chain are lost. This was already true for old step
+4 — the change makes it worse, and widening the sheet is the fix.
+
+Covered by three cases in `tests/appsScript.test.js`: the full six-step target map, the
+phoneless row opening at John, and call 2 going back to the technician rather than to John.
+Lands in the gitignored `google-sheet/code.gs` — paste required.
+
 ## Session 2026-09-29 — the job path stops trusting the analyser
 
 Braconier row 745 of the escalation sheet — `call_a20a1973331d6d375307e080089`, 2026-09-26,
