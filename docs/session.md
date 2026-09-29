@@ -859,6 +859,47 @@ totalAssignments 1   totalAppointments 112
 The second `techs` entry is the API's null padding (`servicetrade_client.py:186-193`); the
 helper skips it rather than indexing `[0]`.
 
+### Measured on production, 2026-09-29 — the send really is early
+
+The design assumes the post-call email goes out before the escalation dispatches. Measured
+against 400 Adaptive `call_logs` rows (`agent_efbe503faedf1bf516f961979f`).
+
+`updated_at` is a **contaminated** proxy for send time — 213 of 400 rows show a lag over 24h,
+and **203 of those share one `updated_at` date, 2026-08-28**, plus 9 on 09-09. Those are bulk
+rewrites (the `backfill-intent.ts` retag), not slow sends. Excluding them leaves 187 rows:
+
+| | lag from `start_timestamp` |
+|---|---|
+| min | 0.3 min |
+| p25 | 2.6 min |
+| **median** | **3.9 min** |
+| p75 | 4.9 min |
+| p90 | 5.4 min |
+| p99 | 2.2 h |
+| max | 2.7 h |
+
+The ladder spaces its steps 5 minutes apart and runs 5-25 minutes, so a median 3.9-minute email
+lands **before the dispatch chain has worked through**. That is what makes the live
+`/api/assignments` lookup correct: "who is on call now" is still this call's shift.
+
+`ONCALL_MAX_AGE_MINUTES = 120` is calibrated against that: **98.4% of all sends and 98.3% of
+Emergency sends fall inside it.** The ~1.6% it suppresses are the genuine outliers past p99,
+which are exactly the delayed sends where the rota is most likely to have rolled over. Keep it.
+
+### The emergency gate, verified against production rows
+
+`intent` is stored as an exact string with no case variants and no nulls on this agent —
+**Emergency 201, Inquiry 172, Service 27** across 400 rows. Running the real helper over all
+400, with the live API response stubbed in:
+
+```
+201  Emergency -> CC ATTACHED
+172  Inquiry   -> no cc
+ 27  Service   -> no cc
+```
+
+Zero leakage. A non-Adaptive agent id over the same rows: 50/50 unchanged, whatever the intent.
+
 ### Verification
 
 Sixteen cases against the extracted function with `UrlFetchApp` stubbed — other tenant,
