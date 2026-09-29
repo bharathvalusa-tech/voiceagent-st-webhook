@@ -959,3 +959,179 @@ account; and `asLocationId` rejecting `{{mustache}}`, a company name and `1.4954
   set no verification variables, and removing it would change Adaptive's behaviour.
 - **`caller_details` returning false is ignored.** The prompt only calls that tool after a
   successful lookup, so a false there is an absence wearing a verdict's clothes.
+
+## Session 2026-09-29 — the Adaptive on-call technician on the post-call client email
+
+Adaptive's post-call client email went to two fixed addresses and never to the technician who
+was dispatched. Listing technicians statically in the config sheet was rejected: every CC
+recipient is a billable SendGrid send, on every call for that tenant, emergency or not.
+
+The change lands entirely in the **"Clara - Post Call Emails"** Apps Script — mirrored locally
+at the gitignored `google-sheet/email-sheet.gs`, paste-only. Nothing tracked in this repo
+changes. Written up in `.claude/patches/clara-postcall-oncall-tech-cc.md`.
+
+### The lookup is live, and needs no deploy
+
+`/api/assignments` answers *who is on call right now*. **The post-call email is sent before the
+escalation dispatches to the technician** (owner's call, 2026-09-29), so "now" is still this
+call's shift and the plain deployed endpoint is correct as-is.
+
+That matters beyond correctness: **the `?at=` parameter is no longer needed.** It existed only
+to make the endpoint answer a historical question, and the `adaptive-climate-api` deploy it
+required — a repo with no git remote, on a Vercel team this account cannot reach — was what
+parked this work since 2026-09-28. The uncommitted `?at=` changes in that directory are now
+unnecessary for this feature and stay parked.
+
+Rejected alternative: reading the escalation sheet's column M, which holds the same API's answer
+captured at call time and is therefore correct regardless of send lag. It couples the email
+script to the escalation sheet's internals, and is unnecessary when the send is early.
+
+`ONCALL_MAX_AGE_MINUTES` (120) keeps that assumption honest. Normally it never fires. When a
+send is delayed — GPT retry, SQS backlog, missed trigger — the rota may have rolled over, and
+skipping the CC is right where copying the wrong technician is not.
+
+### Two premises checked, both false
+
+- **"A GPT extractor on clara-lead-agent-server provides `intent`."** No. It was removed
+  deliberately — `gpt-processing.service.ts:248-252` refuses to write it, because a second
+  writer would put `intent` out of step with the sheet. `intent` is set by
+  `WebhookService.resolveIntent` (`webhook.service.ts:264-267`), synchronously, before the GPT
+  job is even enqueued.
+
+  **This is better than a GPT tag, for Adaptive specifically.** `call-mapping.ts:101-103`
+  allowlists exactly `agent_efbe503faedf1bf516f961979f` for flag-based classification, so
+  `intent === 'Emergency'` **is** the agent's own `isEmergency` post-call variable — the same
+  source as escalation-sheet column R. That makes it a sound gate with no extra lookup.
+
+- **"Whenever there is an emergency, there have been dispatch calls."** No. Measured across all
+  587 rows of the live escalation sheet: 264 emergencies, **172 with a dispatch call, 92 (35%)
+  with none** — the 45-minute alarm-monitor cooldown and address-less paths
+  (`escalation.service.ts:36-41`, which documents chains landing with `calls: []`). Those calls
+  still get the CC: the technician was on duty whether or not the ladder ran.
+
+### Measured on the live sheet, worth keeping
+
+Of the 264 emergencies, 244 carry an address in column M — and **all 244 also have column O or
+P set.** The caller-email fallback at `adaptiveclimate.py:431`, where column M silently becomes
+the CALLER's address, is real in code but **has never once fired in production**. The remaining
+20 have no address at all.
+
+### Two things that are not style preferences
+
+- **The dedupe is mandatory.** `sendEmailViaSendgrid` does none (`email-sheet.gs:540-541`), and
+  SendGrid rejects the whole message when one address is in both `to` and `cc`. That 400 returns
+  `false`, so `updateEmailSentStatus` never runs, so `email_sent` stays `0` — and the call is
+  **retried every run, forever.** One duplicate address wedges a tenant's notifications
+  permanently.
+- **The helper must never throw.** The main loop's per-call `catch` swallows and continues,
+  leaving `email_sent = 0` — the same silent infinite retry.
+
+### The endpoint was tested live, 2026-09-29
+
+`GET https://adaptive-climate.vercel.app/api/assignments` returned a real technician:
+
+```
+name  "Shaquille Donalds"   email "sd@adaptiveclimates.ca"   phone "+16476326248"
+job   "Emergency Service Call Job #46705275"
+totalAssignments 1   totalAppointments 112
+```
+
+The second `techs` entry is the API's null padding (`servicetrade_client.py:186-193`); the
+helper skips it rather than indexing `[0]`.
+
+### Measured on production, 2026-09-29 — the send really is early
+
+The design assumes the post-call email goes out before the escalation dispatches. Measured
+against 400 Adaptive `call_logs` rows (`agent_efbe503faedf1bf516f961979f`).
+
+`updated_at` is a **contaminated** proxy for send time — 213 of 400 rows show a lag over 24h,
+and **203 of those share one `updated_at` date, 2026-08-28**, plus 9 on 09-09. Those are bulk
+rewrites (the `backfill-intent.ts` retag), not slow sends. Excluding them leaves 187 rows:
+
+| | lag from `start_timestamp` |
+|---|---|
+| min | 0.3 min |
+| p25 | 2.6 min |
+| **median** | **3.9 min** |
+| p75 | 4.9 min |
+| p90 | 5.4 min |
+| p99 | 2.2 h |
+| max | 2.7 h |
+
+The ladder spaces its steps 5 minutes apart and runs 5-25 minutes, so a median 3.9-minute email
+lands **before the dispatch chain has worked through**. That is what makes the live
+`/api/assignments` lookup correct: "who is on call now" is still this call's shift.
+
+`ONCALL_MAX_AGE_MINUTES = 120` is calibrated against that: **98.4% of all sends and 98.3% of
+Emergency sends fall inside it.** The ~1.6% it suppresses are the genuine outliers past p99,
+which are exactly the delayed sends where the rota is most likely to have rolled over. Keep it.
+
+### The emergency gate, verified against production rows
+
+`intent` is stored as an exact string with no case variants and no nulls on this agent —
+**Emergency 201, Inquiry 172, Service 27** across 400 rows. Running the real helper over all
+400, with the live API response stubbed in:
+
+```
+201  Emergency -> CC ATTACHED
+172  Inquiry   -> no cc
+ 27  Service   -> no cc
+```
+
+Zero leakage. A non-Adaptive agent id over the same rows: 50/50 unchanged, whatever the intent.
+
+### Verification
+
+Sixteen cases against the extracted function with `UrlFetchApp` stubbed — other tenant,
+non-emergency, the happy path, case-insensitive intent, empty cc, stale call, missing
+timestamp, duplicate of `to`, duplicate of `cc` case-insensitively, null-padded techs, nobody on
+duty, non-200, thrown exception, malformed JSON, all-null techs, null `cc`. All pass. Then run
+against the **real** live `/api/assignments` response: correctly skipped the null-padded second
+entry and produced `jm@adaptiveclimates.com,sd@adaptiveclimates.ca`.
+
+### Outstanding
+
+- ~~**The fresh ServiceTrade login per request.**~~ **RESOLVED 2026-09-29 — the collision does
+  not exist.** This had been outstanding since 2026-09-28 as "step 0a".
+
+  Both Adaptive `servicetrade_tokens` rows authenticate as ServiceTrade user **`Clara_AI`**:
+  `agent_c4123a0589c456c9f19e369340` ("Adaptive Climates Inc.(Outbound)") and
+  `agent_efbe503faedf1bf516f961979f` ("Adaptive Climates Inc."). The Vercel env var on
+  `adaptive-climate-api` is unreadable from this account, so it was measured instead.
+
+  **The experiment.** ServiceTrade is one session per user, and a dead session answers `404`
+  on `GET /api/auth` rather than `401` (`docs/servicetrade-session-health.md`). The outbound
+  row's stored `PHPSESSID` was issued 2026-09-26 and still answered `200`. Calling the deployed
+  `/api/assignments` and re-checking gave `200` again — **200 → call → 200**. Had the endpoint
+  logged in as `Clara_AI` it would have taken a new session and killed that one.
+
+  So `adaptive-climate-api` authenticates as some other ServiceTrade user, and adding one call
+  per Adaptive emergency does not touch the dispatch path's session.
+
+  **Do not "fix" this by pointing the service at `Clara_AI`.** It gains nothing — the endpoint
+  is already Adaptive-only via the hardcoded `jobId: '2456684740761729'`
+  (`servicetrade_client.py:45`) plus the `'Emergency Service Call'` name filter (`:132`), not
+  via which user authenticates. Switching would *create* the collision, because `api/index.py:25`
+  logs in on every request. Raised and rejected on 2026-09-29.
+
+- **The Main Router row's ServiceTrade session is dead and that is fine.**
+  `agent_efbe503faedf1bf516f961979f` answers `404` on `GET /api/auth`, `last_modified`
+  2026-09-11, `last_auth_status` null, `credentials_fingerprint` null — it has never been
+  health-checked. Adaptive's ServiceTrade work all runs under the outbound agent's row, which is
+  alive and maintained. Confirmed unused, 2026-09-29. Not a fault.
+- **Confirm the send really is early.** The whole design rests on it. Compare Adaptive post-call
+  emails in SendGrid (recipient `ch@adaptiveclimates.ca`, subject `📞 New Call Received from …`)
+  against the same call's `start_timestamp`. Not measured — the browser extension dropped
+  mid-check. If the median lag is hours rather than minutes, the staleness guard will suppress
+  most CCs and the design needs revisiting.
+- **Sheet1 row 62 holds dead data.** `jm@adaptiveclimates.com` in column **G** and
+  `ak@adaptiveclimates.com, dispatch1@adaptiveclimates.com` in column **I**. `agentMap` reads
+  only columns B–E (`email-sheet.gs:236-239`), so **those addresses receive nothing.** Move them
+  into column D or delete them.
+- **The escalation sheet appears link-shared.** It answered an unauthenticated `gviz` query
+  while the config sheet refused. It holds customer names, phone numbers, service addresses and
+  full call transcripts. Worth checking its sharing settings.
+- **`vercel-webhook-integration` is a PUBLIC repo** and its `google-sheet/adpative_code.gs`
+  carries a live plaintext SendGrid key. The file is gitignored (`.gitignore:93`) and has never
+  been committed — verified against the full history — so nothing is exposed today. But one
+  `git add -f` would publish it. Rotating that key is worth doing regardless.
