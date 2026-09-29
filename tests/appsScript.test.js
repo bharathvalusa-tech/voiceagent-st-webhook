@@ -488,3 +488,154 @@ test('an active location gets no inactive prefix on the technician email', skipI
     const mail = env.fetches.find((f) => f.url.includes('sendgrid'));
     assert.ok(!JSON.parse(mail.options.payload).subject.includes('INACTIVE'));
 });
+
+// ---------------------------------------------- the test inbound / outbound pair
+
+test('a test call rings the test OUTBOUND line, not the number it came from', skipIfNoAppsScript(), () => {
+    // Two different phones on purpose: you call in from one and answer the dispatch
+    // call on the other. Ringing the handset that just placed the call gets a busy
+    // line and a test that never completes.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: {
+            TEST_OVERRIDE_NUMBERS: ['+14169012663'],
+            TEST_OUTBOUND_NUMBER: '+14165559999'
+        }
+    });
+
+    const target = env.sandbox.getCallTarget(1, 0, '+14165551234', 'Real Tech', '+14169012663');
+    assert.strictEqual(target.phone, '+14165559999', 'the test outbound line is dialled');
+    assert.strictEqual(target.name, 'Real Tech', 'the contact name is kept for the trail');
+});
+
+test('a real caller is unaffected by the test outbound line', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: {
+            TEST_OVERRIDE_NUMBERS: ['+14169012663'],
+            TEST_OUTBOUND_NUMBER: '+14165559999'
+        }
+    });
+
+    const target = env.sandbox.getCallTarget(1, 0, '+14165551234', 'Real Tech', '+14167770000');
+    assert.strictEqual(target.phone, '+14165551234', 'the real technician is called as always');
+});
+
+test('an unset test outbound line still rings the caller back', skipIfNoAppsScript(), () => {
+    // Regression guard: this was the only behaviour before the two lines were split.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_OVERRIDE_NUMBERS: ['+14169012663'], TEST_OUTBOUND_NUMBER: '' }
+    });
+
+    const target = env.sandbox.getCallTarget(1, 0, '+14165551234', 'Real Tech', '+14169012663');
+    assert.strictEqual(target.phone, '+14169012663');
+});
+
+test('a test row gets ONE call — the ladder does not run', skipIfNoAppsScript(), () => {
+    // Identical setup to "later ladder steps repeat the inactive note", which dials
+    // step 2. The only difference is that this caller is a test number.
+    const env = loadAppsScript({
+        rows: [emergencyRow({
+            RESPONSE_CALL_ID_1: 'call_out_1',
+            CALL_DECLINE_COUNTER: 1,
+            LAST_CALL_TIME: new Date(Date.now() - 60 * 60 * 1000)
+        })],
+        fetchHandler: (url) => {
+            if (url.includes('get-call')) {
+                return { code: 200, body: JSON.stringify({ call_status: 'ended', disconnection_reason: 'dial_no_answer' }) };
+            }
+            return router('matched')(url);
+        },
+        config: {
+            TEST_OVERRIDE_NUMBERS: ['+14169012663'],
+            TEST_OUTBOUND_NUMBER: '+14165559999',
+            TEST_NOTIFICATION_EMAIL: 'tester@example.com'
+        }
+    });
+    env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
+
+    const row = env.grid[0];
+    assert.ok(!env.fetches.some((f) => f.url.includes('create-phone-call')), 'no step 2 dial');
+    assert.strictEqual(row[C.ESCALATION_COMPLETE], true, 'the row closes instead of stalling');
+    assert.strictEqual(row[C.MAKE_CALL], false);
+    assert.match(String(row[C.OUTCOME]), /TEST_ROW/);
+    assert.match(String(row[C.OUTCOME]), /ladder is disabled for test callers/);
+});
+
+test('the attempt cap is 1 for a test caller and 6 for everyone else', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_OVERRIDE_NUMBERS: ['+14169012663'] }
+    });
+
+    assert.strictEqual(env.sandbox.maxEscalationAttempts('+14169012663'), 1);
+    assert.strictEqual(env.sandbox.maxEscalationAttempts('+14167770000'), 6);
+});
+
+// ---------------------------------------------------- the six-step ladder
+
+test('the on-call technician gets the first THREE calls, then it leaves them', skipIfNoAppsScript(), () => {
+    // One missed call is a phone in a pocket, not a refusal. Nobody else is disturbed
+    // until the person actually on duty has been rung three times, 5 minutes apart.
+    const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
+    const at = (step) => env.sandbox.getCallTarget(step, 0, '+14165551234', 'Real Tech', '+14169012663');
+
+    assert.deepEqual(
+        [1, 2, 3].map((s) => at(s)),
+        [
+            { phone: '+14165551234', name: 'Real Tech' },
+            { phone: '+14165551234', name: 'Real Tech' },
+            { phone: '+14165551234', name: 'Real Tech' }
+        ]
+    );
+
+    assert.strictEqual(at(4).name, 'John McLean');
+    assert.strictEqual(at(5).name, 'Alex Kovachev');
+    assert.strictEqual(at(6).name, 'John McLean');
+    assert.strictEqual(at(7), null, 'nothing past the cap');
+});
+
+test('a row with no technician phone opens at John McLean, not at the tech steps', skipIfNoAppsScript(), () => {
+    // Steps 1-3 are the on-call technician. With no number for them there is nobody to
+    // ring three times, so the chain must skip straight to step 4 rather than burning
+    // three attempts on a phoneless target.
+    const env = loadAppsScript({
+        rows: [emergencyRow({ OUTBOUND_TO_NUMBER: '' })],
+        fetchHandler: router('matched')
+    });
+    env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
+
+    const row = env.grid[0];
+    assert.strictEqual(row[C.CALL_DECLINE_COUNTER], 4, 'the chain opens at step 4');
+    const call = env.fetches.find((f) => f.url.includes('create-phone-call'));
+    assert.ok(call, 'a call is still placed');
+    assert.strictEqual(JSON.parse(call.options.payload).to_number, '+14164022601', 'John McLean');
+});
+
+test('the second call goes back to the same technician, not to John', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow({
+            RESPONSE_CALL_ID_1: 'call_out_1',
+            CALL_DECLINE_COUNTER: 1,
+            LAST_CALL_TIME: new Date(Date.now() - 60 * 60 * 1000)
+        })],
+        fetchHandler: (url) => {
+            if (url.includes('get-call')) {
+                return { code: 200, body: JSON.stringify({ call_status: 'ended', disconnection_reason: 'dial_no_answer' }) };
+            }
+            return router('matched')(url);
+        }
+    });
+    env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
+
+    const call = env.fetches.find((f) => f.url.includes('create-phone-call'));
+    assert.ok(call, 'step 2 must dial');
+    assert.strictEqual(JSON.parse(call.options.payload).to_number, '+15551110000', 'the on-call tech again');
+    assert.strictEqual(env.grid[0][C.CALL_DECLINE_COUNTER], 2);
+});
+

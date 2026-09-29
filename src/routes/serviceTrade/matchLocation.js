@@ -69,20 +69,31 @@ router.post('/st-match-location', async (req, res) => {
         const location_name = pick('location_name');
         const company_name = pick('company_name');
         const call_id = pick('call_id', 'inbound_call_id');
+        // The location the CALLER confirmed aloud on the inbound call, carried here by
+        // GAS from the sheet. When present it settles the verdict outright — re-deriving
+        // it from a transcribed address can only agree with what Clara already promised
+        // the caller, or contradict it. Optional: a row recorded before this column
+        // existed, or a call where nothing resolved, simply has no value and the full
+        // matcher runs exactly as it does today.
+        const location_id = pick('location_id', 'st_location_id', 'confirmed_location_id');
 
         console.log('st-match-location received', {
             payloadKeys: Object.keys(src),
             hasAgentId: Boolean(agent_id),
             callId: call_id || null,
             fromNumber: from_number || null,
-            hasServiceAddress: Boolean(service_address)
+            hasServiceAddress: Boolean(service_address),
+            confirmedLocationId: location_id || null
         });
 
         if (!agent_id) {
             return sendErrorResponse(res, 'agent_id (or inbound_agent_id) is required', 400);
         }
-        if (!from_number && !service_address) {
-            return sendErrorResponse(res, 'from_number or service_address is required', 400);
+        // A confirmed location id is sufficient on its own — it is the strongest input
+        // this route accepts, so it must not be rejected for arriving without the weaker
+        // ones the matcher would have needed.
+        if (!from_number && !service_address && !location_id) {
+            return sendErrorResponse(res, 'from_number, service_address or location_id is required', 400);
         }
 
         const outcome = await matchLocationFromCallContext({
@@ -91,7 +102,8 @@ router.post('/st-match-location', async (req, res) => {
             service_address,
             from_number,
             location_name,
-            company_name
+            company_name,
+            location_id
         });
 
         const found = outcome.status === 'matched';

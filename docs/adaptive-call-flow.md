@@ -75,6 +75,53 @@
 
 ## 2. Inbound leg — creating the row
 
+**Before the agent speaks: `POST /st-inbound-lookup`** (`src/routes/serviceTrade/inboundLookup.js`,
+mounted `src/app.js:53`). Retell's inbound-call webhook, configured **per phone number** in the
+Retell dashboard — not on the agent, which is why no agent JSON references it. It reduces
+`call_inbound.from_number` to the last ten digits via `src/utils/phone.js` (extensions stripped
+first) and runs **two sources in parallel**:
+
+| Step | Call | Gives | Blind to |
+|---|---|---|---|
+| **1. Contact search** — wins | one sideloaded `GET /contact?search=<10 digits>&_sideload=contact.locations,contact.companies,location.company`, ~60ms | contact id, name, company, and that contact's locations | a site's own main line — `Location.phoneNumber` is on the location, not on any contact |
+| **2. Location table** — fallback only | `src/services/locationPhoneIndex.js`, one cached `GET /location?limit=1000`, 12h TTL, `servicetrade_locations` mirror on outage | every location's own main line, plus its primary contact's phone/mobile/alternate | who is calling — it has no contact fields |
+
+**Contact search dominates.** A ten-digit hit on a contact means a person on the account, and
+the sites that contact is attached to are the sites they call about. When step 1 yields a
+location the search is over: the table is never consulted for a second opinion and cannot
+overturn it. Step 2 runs only when step 1 produced **no** location at all — which is exactly
+the case the table exists for, since a caller ringing their own front desk is invisible to
+`/contact?search=` however the query is shaped.
+
+Both requests still fire in parallel (`inboundLookup.js:130`). The table's answer is usually
+discarded, but waiting for the contact search to fail first would put a cold index rebuild
+(~800ms) in series inside a 4s deadline on a ringing phone.
+
+Locations are deduped by id before being counted — one person recorded twice on a site is not
+two sites. Exactly one → resolved. Several → `st_needs_location` goes `"true"` and
+`st_location_options` carries the spoken addresses, so the agent asks *which* site instead of
+asking for the address from scratch. Either source failing is logged and the other still
+answers; only both failing is a `lookup_error`.
+
+**Deliberate trade-off.** A number on ONE contact resolves even when the same number is also
+the main line of other sites — the contact's location wins and the others are never seen.
+`customerMatchingService.js:554-562` refuses exactly that shape at job-matching time; this
+route disagrees on purpose, because its verdict is advisory, read back to the caller for
+confirmation, and the authoritative match still runs after the call.
+
+**There is no in-call lookup tool on the Adaptive path.** Everything the agent knows about the
+caller's location arrives in this one response, before anyone speaks. `/st-verify-customer` is
+**Braconier's** route and no Adaptive agent calls it. So an ambiguous number is resolved the
+ordinary way — the caller names the site, that becomes the spoken service address, and
+`matchLocationFromCallContext` matches it after the call (§4).
+
+Returns `st_location_*`, `st_contact_*`, `st_company_*` and `address_match` as dynamic
+variables, so Clara can name the caller and read their address back instead of asking for
+either. **Advisory and fail-open** — every failure returns 200 with `st_lookup_ok: "false"` and
+empty fields. It gates nothing, but `st_location_id` is now carried to job time (§4) as the
+location the caller confirmed, so the address-derived match is a fallback rather than the only
+answer.
+
 1. **Retell → the Vercel Python app.** The two inbound agents post their post-call
    webhooks to `vercel-webhook-integration` (`api/adaptiveclimate.py`), confirmed
    with the account owner 2026-08-28. `forward_to_api_gateway()` (`:594-597`) forwards
@@ -258,7 +305,25 @@ derive it, since all three cases used to read as `no job — tech declined`.
   4. **Pre-flight ServiceTrade location gate (first call only)** — before the very
      first escalation call, `matchesServiceTradeLocation()` POSTs to
      `voiceagent-st-webhook /st-match-location` (`CONFIG.ST_MATCH_URL`). The verdict is
-     written to column AD `location_status` and decides only whether we dial:
+     written to column AD `location_status` and decides only whether we dial.
+
+     **A confirmed location id short-circuits the matcher.** When the payload carries
+     `location_id` — the id `/st-inbound-lookup` resolved and the caller confirmed aloud —
+     `matchLocationFromCallContext` reads `GET /location/{id}` and returns that verdict
+     outright (`src/services/contextJobService.js:22`). Re-deriving a location from a
+     transcribed address can only agree with what Clara already promised the caller, or
+     contradict it, and a contradiction sends the van somewhere nobody named. A failed or
+     unknown read falls back to the full matcher, so a confirmed id can never *lose* a
+     dispatch that address matching would have won. The same id is passed into
+     `createJobFromCallContext`, so the gate verdict and the created job still cannot drift.
+
+     **The webhook side is live; the carrier is not.** GAS has no column for the id and the
+     Python app does not extract it yet, so today the field is always absent and every call
+     matches the hard way. Hunks for both are written out and unapplied, in
+     `.claude/patches/gas-location-id.md` and `.claude/patches/python-location-id.md`
+     (untracked — `.claude/` is not in git).
+
+     The verdicts:
      - `active` → dial.
      - `inactive` → **dial anyway.** Deactivation is a ServiceTrade bookkeeping state and
        says nothing about whether the emergency is real; 147 of the account's 393
@@ -604,6 +669,9 @@ because six rows is not worth a Google service account. Idempotent.
 | voiceagent-st-webhook | `ADAPTIVE_SHEET_EXEC_URL` | GAS web app (`job_update` write-back) |
 | voiceagent-st-webhook | *(none — ST config owner)* | resolved per-tenant from the **outbound agent's own id** (`call.agent_id`) → its `servicetrade_tokens` + `servicetrade_job_configs` rows. No global default env var (removed); missing row → loud 500. See §2.1 |
 | voiceagent-st-webhook | `POSTCALL_JOB_DISABLED_AGENT_IDS` | inbound agents blocked from post-call job creation (all 3 Adaptive inbound agents) — see §2.1 |
+| voiceagent-st-webhook | `INBOUND_LOOKUP_AGENT_IDS` | inbound agents allowed to drive `POST /st-inbound-lookup`. Defaults to all three Adaptive inbound agents — set only to change that |
+| voiceagent-st-webhook | `INBOUND_LOOKUP_ST_AGENT_ID` | whose `servicetrade_tokens` row that lookup authenticates with. **Not** the inbound agent — Adaptive's ServiceTrade config lives on the outbound dispatch agent. Defaults to `agent_c412…` |
+| Retell dashboard | Phone number → Inbound Call Webhook URL | `https://voiceagent-st-webhook.vercel.app/st-inbound-lookup`. Per NUMBER, not per agent. Unset means every caller is asked for their address from scratch |
 | GAS `CONFIG` | `ST_MATCH_URL` | pre-flight location check endpoint (`voiceagent-st-webhook /st-match-location`); GAS passes `agent_id = RETELL_AGENT_ID` (the outbound agent) — see §4 |
 | vercel-webhook-integration | `ADAPTIVE_EXEC_URL` | GAS web app (inbound row create) |
 | vercel-webhook-integration | `RETELL_API_KEY`, `FALLBACK_TECH_EMAIL/PHONE` | Retell re-fetch + tech fallback |

@@ -1,5 +1,53 @@
 const { createJob, getAuthToken } = require('../controllers/serviceTradeController');
 const { findCustomerWithConfidence } = require('./customerMatchingService');
+const serviceTradeService = require('./serviceTradeService');
+
+/**
+ * The location the CALLER confirmed out loud, resolved straight from its id.
+ *
+ * WHY IT SHORT-CIRCUITS THE MATCHER. /st-inbound-lookup and /st-verify-customer read the
+ * address back to the caller and the caller said yes. Re-deriving a location from a
+ * transcribed address afterwards can only ever agree with that or contradict it, and a
+ * contradiction sends the van somewhere the caller never named. Braconier already works
+ * this way (retell.js:1037-1056); this is the same rule on the Adaptive path.
+ *
+ * WHY IT STILL COSTS A REQUEST. The gate and the job both need `status` — an inactive
+ * site is dispatched but flagged everywhere (matchLocation.js:15-19) — and the id alone
+ * does not carry it. GET /location/{id} is one read and this path runs once per escalation.
+ *
+ * Returns null when the id is unusable or the read fails, and the caller falls back to the
+ * full matcher. A confirmed id must never be able to LOSE a dispatch that address matching
+ * would have won.
+ */
+async function resolveConfirmedLocation(authToken, locationId) {
+    const id = String(locationId || '').trim();
+    if (!id) return null;
+
+    try {
+        const location = await serviceTradeService.getLocationById(authToken, id);
+        if (!location || !location.id) {
+            console.warn(`[context-job] confirmed location ${id} not found — falling back to matching`);
+            return null;
+        }
+
+        const a = location.address || {};
+        return {
+            status: 'matched',
+            locationId: location.id,
+            locationName: location.name || '',
+            tier: 1,
+            tierReason: 'location confirmed by the caller during the call',
+            locationStatus: location.status === 'inactive' ? 'inactive' : 'active',
+            matchedAddress: [a.street, a.city, a.state, a.postalCode]
+                .map((part) => String(part || '').trim())
+                .filter(Boolean)
+                .join(', ')
+        };
+    } catch (error) {
+        console.error(`[context-job] confirmed location ${id} lookup failed: ${error.message || error} — falling back to matching`);
+        return null;
+    }
+}
 
 /**
  * Resolve a confident ServiceTrade location from raw call context — WITHOUT
@@ -18,6 +66,8 @@ const { findCustomerWithConfidence } = require('./customerMatchingService');
  * @param {string} [fields.from_number]
  * @param {string} [fields.location_name]
  * @param {string} [fields.company_name]
+ * @param {string} [fields.location_id]   ServiceTrade location id the caller confirmed on
+ *                                        the inbound call; short-circuits the matcher
  * @returns {Promise<{status:'matched', locationId:*, locationName:*, tier:*,
  *                    locationStatus:'active'|'inactive', matchedAddress:string}
  *                   | {status:'no_match'}>}
@@ -30,7 +80,8 @@ async function matchLocationFromCallContext(fields) {
         service_address,
         from_number,
         location_name,
-        company_name
+        company_name,
+        location_id
     } = fields || {};
 
     if (!agent_id) {
@@ -39,6 +90,12 @@ async function matchLocationFromCallContext(fields) {
 
     // Validates/refreshes the stored PHPSESSID and returns a usable token.
     const authToken = await getAuthToken(agent_id);
+
+    const confirmed = await resolveConfirmedLocation(authToken, location_id);
+    if (confirmed) {
+        console.log(`[context-job] using the location confirmed on the call: ${confirmed.locationId} "${confirmed.locationName}" (${confirmed.locationStatus})`);
+        return confirmed;
+    }
 
     const candidates = await findCustomerWithConfidence(authToken, {
         phone: from_number,
@@ -128,6 +185,7 @@ async function matchLocationFromCallContext(fields) {
  * @param {string} [fields.call_id]
  * @param {string} [fields.location_name]
  * @param {string} [fields.company_name]
+ * @param {string} [fields.location_id]   location the caller confirmed on the inbound call
  * @returns {Promise<{status:'created', job:Object, matchedLocationId:*, matchedLocationName:*,
  *                    matchTier:*, locationStatus:'active'|'inactive', matchedAddress:string}
  *                   | {status:'no_match'}>}
@@ -142,7 +200,8 @@ async function createJobFromCallContext(fields) {
         call_summary,
         call_id,
         location_name,
-        company_name
+        company_name,
+        location_id
     } = fields || {};
 
     // Same auth + confident-location resolution the pre-flight gate uses, so the
@@ -153,7 +212,8 @@ async function createJobFromCallContext(fields) {
         service_address,
         from_number,
         location_name,
-        company_name
+        company_name,
+        location_id
     });
 
     if (match.status !== 'matched') {
@@ -193,4 +253,4 @@ async function createJobFromCallContext(fields) {
     };
 }
 
-module.exports = { createJobFromCallContext, matchLocationFromCallContext };
+module.exports = { createJobFromCallContext, matchLocationFromCallContext, resolveConfirmedLocation };

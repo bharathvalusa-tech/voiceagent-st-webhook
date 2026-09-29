@@ -406,20 +406,48 @@ const callInbound = (port, agentId, fromNumber) => fetch(`http://127.0.0.1:${por
 
 const INBOUND_AGENT = 'agent_efbe503faedf1bf516f961979f';
 
+// The real helpers, not hand-rolled copies: an inline stub would keep passing after
+// normalizePhone or spokenAddress regressed.
+const realNormalizePhone = require(path.join(REPO, 'src/utils/phone')).normalizePhone;
+const realSpokenAddress = require(path.join(REPO, 'src/services/contactSearchService')).spokenAddress;
+
+/**
+ * Both sources, stubbed the way the route now consumes them.
+ *
+ * @param indexHits  array of locationPhoneIndex hits ({locationId, address, ...})
+ * @param contacts   array of NORMALIZED contacts ({contactId, contactName, locations:[row]})
+ */
+const inboundMocks = ({ indexHits = [], contacts = [], getAuthToken = async () => 'tok', searchThrows = false } = {}) => ({
+    '../../controllers/serviceTradeController': { getAuthToken },
+    '../../services/locationPhoneIndex': {
+        normalizePhone: realNormalizePhone,
+        lookupAllByPhone: async () => indexHits,
+        // Mirrors the real rule closely enough for these cases: one hit identifies a site,
+        // a collision identifies none. The active-over-deactivated-duplicates preference
+        // is the real function's own business and is covered where it lives.
+        lookupByPhone: async () => (indexHits.length === 1 ? indexHits[0] : null)
+    },
+    '../../services/contactSearchService': {
+        spokenAddress: realSpokenAddress,
+        searchContacts: async () => {
+            if (searchThrows) throw new Error('contact search down');
+            return { contacts, shape: 'sideloaded', totalRecords: contacts.length };
+        }
+    }
+});
+
+const locationRow = (over = {}) => ({
+    servicetrade_id: 42, name: 'Single Site', status: 'active',
+    street: '1 A St', city: '', state: '', postal_code: '', ...over
+});
+
 test('inbound lookup returns Retell-shaped dynamic variables for an inactive location', async () => {
-    const app = await inboundApp({
-        '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
-        '../../services/locationPhoneIndex': {
-            // The real helper, not a hand-rolled copy: an inline stub would keep
-            // passing after normalizePhone regressed.
-            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
-            lookupByPhone: async () => ({
-                locationId: 6398701, locationName: '2213256 Ontario Ltd.',
-                locationStatus: 'inactive', matchedAddress: '9 Elmcrest Rd., Georgetown, ON, L7G 4R8'
-            })
-        },
-        '../../services/serviceTradeService': { searchContacts: async () => [] }
-    });
+    const app = await inboundApp(inboundMocks({
+        indexHits: [{
+            locationId: 6398701, locationName: '2213256 Ontario Ltd.',
+            locationStatus: 'inactive', matchedAddress: '9 Elmcrest Rd., Georgetown, ON, L7G 4R8'
+        }]
+    }));
     try {
         const body = await callInbound(app.port, INBOUND_AGENT, '+19056710220');
         const v = body.call_inbound.dynamic_variables;
@@ -434,14 +462,9 @@ test('inbound lookup returns Retell-shaped dynamic variables for an inactive loc
 });
 
 test('inbound lookup fails OPEN when ServiceTrade throws', async () => {
-    const app = await inboundApp({
-        '../../controllers/serviceTradeController': { getAuthToken: async () => { throw new Error('ST down'); } },
-        '../../services/locationPhoneIndex': {
-            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
-            lookupByPhone: async () => null
-        },
-        '../../services/serviceTradeService': { searchContacts: async () => [] }
-    });
+    const app = await inboundApp(inboundMocks({
+        getAuthToken: async () => { throw new Error('ST down'); }
+    }));
     try {
         const body = await callInbound(app.port, INBOUND_AGENT, '+19056710220');
         const v = body.call_inbound.dynamic_variables;
@@ -461,14 +484,7 @@ test('address_match is present and empty on every non-match path', async () => {
         ['no_from_number', INBOUND_AGENT, '']
     ];
     for (const [expectedReason, agent, from] of cases) {
-        const app = await inboundApp({
-            '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
-            '../../services/locationPhoneIndex': {
-                normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
-                lookupByPhone: async () => null
-            },
-            '../../services/serviceTradeService': { searchContacts: async () => [] }
-        });
+        const app = await inboundApp(inboundMocks());
         try {
             const body = await callInbound(app.port, agent, from);
             const v = body.call_inbound.dynamic_variables;
@@ -479,20 +495,15 @@ test('address_match is present and empty on every non-match path', async () => {
 });
 
 test('a resolved caller gets the four spoken address parts, in order', async () => {
-    const app = await inboundApp({
-        '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
-        '../../services/locationPhoneIndex': {
-            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
-            lookupByPhone: async () => ({
-                locationId: 6398685,
-                locationName: 'Residence(31 Larkspur Rd.)',
-                locationStatus: 'active',
-                address: { street: '31 Larkspur Road', city: 'Toronto', state: 'ON', postalCode: 'M5R 2L4' },
-                matchedAddress: 'ignored — rebuilt from the parts'
-            })
-        },
-        '../../services/serviceTradeService': { searchContacts: async () => [] }
-    });
+    const app = await inboundApp(inboundMocks({
+        indexHits: [{
+            locationId: 6398685,
+            locationName: 'Residence(31 Larkspur Rd.)',
+            locationStatus: 'active',
+            address: { street: '31 Larkspur Road', city: 'Toronto', state: 'ON', postalCode: 'M5R 2L4' },
+            matchedAddress: 'ignored — rebuilt from the parts'
+        }]
+    }));
     try {
         const body = await callInbound(app.port, INBOUND_AGENT, '+14169012663');
         const v = body.call_inbound.dynamic_variables;
@@ -502,20 +513,15 @@ test('a resolved caller gets the four spoken address parts, in order', async () 
 
 test('a blank address part is skipped rather than leaving a stray comma', async () => {
     // Four of the 395 mirrored locations carry no postal code.
-    const app = await inboundApp({
-        '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
-        '../../services/locationPhoneIndex': {
-            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
-            lookupByPhone: async () => ({
-                locationId: 1,
-                locationName: 'No postal on file',
-                locationStatus: 'active',
-                address: { street: '77 Sandpiper Drive', city: 'Toronto', state: 'ON', postalCode: '' },
-                matchedAddress: ''
-            })
-        },
-        '../../services/serviceTradeService': { searchContacts: async () => [] }
-    });
+    const app = await inboundApp(inboundMocks({
+        indexHits: [{
+            locationId: 1,
+            locationName: 'No postal on file',
+            locationStatus: 'active',
+            address: { street: '77 Sandpiper Drive', city: 'Toronto', state: 'ON', postalCode: '' },
+            matchedAddress: ''
+        }]
+    }));
     try {
         const body = await callInbound(app.port, INBOUND_AGENT, '+14169012663');
         assert.strictEqual(body.call_inbound.dynamic_variables.address_match, '77 Sandpiper Drive, Toronto, ON');
@@ -523,43 +529,130 @@ test('a blank address part is skipped rather than leaving a stray comma', async 
 });
 
 test('inbound lookup rejects an agent that is not on the allowlist', async () => {
-    const app = await inboundApp({
-        '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
-        '../../services/locationPhoneIndex': {
-            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
-            lookupByPhone: async () => null
-        },
-        '../../services/serviceTradeService': { searchContacts: async () => [] }
-    });
+    const app = await inboundApp(inboundMocks());
     try {
         const body = await callInbound(app.port, 'agent_someone_else', '+19056710220');
         assert.strictEqual(body.call_inbound.dynamic_variables.st_lookup_reason, 'agent_not_enabled');
     } finally { app.close(); }
 });
 
-test('inbound lookup falls back to contact search, and ignores catch-all contacts', async () => {
-    const manyLocations = { phone: '905-671-0220', locations: Array.from({ length: 12 }, (_, i) => ({ id: i })) };
-    const single = { phone: '905-671-0220', locations: [{ id: 42, name: 'Single Site', status: 'active', address: { street: '1 A St' } }] };
+test('a catch-all contact identifies no single site', async () => {
+    const manyLocations = {
+        contactId: 7, contactName: 'Front Desk', companyId: 3, companyName: 'Property Co',
+        locations: Array.from({ length: 12 }, (_, i) => locationRow({ servicetrade_id: i + 1 }))
+    };
+    const single = {
+        contactId: 9, contactName: 'Dana Reyes', companyId: 4, companyName: 'Acme',
+        locations: [locationRow()]
+    };
 
     for (const [label, contacts, expectFound] of [
         ['catch-all contact', [manyLocations], 'false'],
         ['single-location contact', [single], 'true']
     ]) {
-        const app = await inboundApp({
-            '../../controllers/serviceTradeController': { getAuthToken: async () => 'tok' },
-            '../../services/locationPhoneIndex': {
-                // The real helper, not a hand-rolled copy: an inline stub would keep
-            // passing after normalizePhone regressed.
-            normalizePhone: require(path.join(REPO, 'src/utils/phone')).normalizePhone,
-                lookupByPhone: async () => null
-            },
-            '../../services/serviceTradeService': { searchContacts: async () => contacts }
-        });
+        const app = await inboundApp(inboundMocks({ contacts }));
         try {
             const body = await callInbound(app.port, INBOUND_AGENT, '+19056710220');
             assert.strictEqual(body.call_inbound.dynamic_variables.st_location_found, expectFound, label);
         } finally { app.close(); }
     }
+});
+
+// --- precedence: contact search wins, the location table is the fallback --------
+
+test('a contact hit settles the location even when the table holds other sites', async () => {
+    // DELIBERATE. customerMatchingService.js:554-562 refuses this shape at job-matching
+    // time — one contact looking unique while the same number is the main line of two
+    // other sites. This route disagrees on purpose: the verdict is advisory, the caller
+    // confirms it aloud, and the authoritative match still runs after the call.
+    const app = await inboundApp(inboundMocks({
+        indexHits: [
+            { locationId: 100, locationName: 'Northvale A', locationStatus: 'active', address: { street: '500 Ridgeway Ave E' } },
+            { locationId: 101, locationName: 'Northvale B', locationStatus: 'active', address: { street: '520 Ridgeway Ave E' } }
+        ],
+        contacts: [{
+            contactId: 9, contactName: 'Dana Reyes', companyId: 4, companyName: 'Acme',
+            locations: [locationRow({ servicetrade_id: 102, name: 'Northvale C', street: '540 Ridgeway Ave E' })]
+        }]
+    }));
+    try {
+        const v = (await callInbound(app.port, INBOUND_AGENT, '+19056710220')).call_inbound.dynamic_variables;
+        assert.strictEqual(v.st_location_found, 'true');
+        assert.strictEqual(v.st_location_id, '102', 'the contact’s site, not either index one');
+        assert.strictEqual(v.st_lookup_reason, 'contact_search');
+        assert.strictEqual(v.st_needs_location, 'false', 'the index hits are never offered as options');
+    } finally { app.close(); }
+});
+
+test('the table is consulted only when contact search yields no location', async () => {
+    // The site's own main line. /contact?search= can name the caller but cannot return
+    // this location, because Location.phoneNumber is not on any contact.
+    const app = await inboundApp(inboundMocks({
+        indexHits: [{
+            locationId: 42, locationName: 'Front Desk Site', locationStatus: 'active',
+            address: { street: '1 A St', city: 'Toronto', state: 'ON', postalCode: '' }
+        }],
+        contacts: [{
+            contactId: 9, contactName: 'Dana Reyes', companyId: 4, companyName: 'Acme',
+            locations: []
+        }]
+    }));
+    try {
+        const v = (await callInbound(app.port, INBOUND_AGENT, '+19056710220')).call_inbound.dynamic_variables;
+        assert.strictEqual(v.st_location_found, 'true');
+        assert.strictEqual(v.st_location_id, '42');
+        assert.strictEqual(v.st_lookup_reason, 'location_phone_index');
+        assert.strictEqual(v.st_contact_name, 'Dana Reyes', 'the caller is still named from the contact');
+        assert.strictEqual(v.st_company_name, 'Acme');
+    } finally { app.close(); }
+});
+
+test('an ambiguous table hit offers options rather than guessing', async () => {
+    const app = await inboundApp(inboundMocks({
+        indexHits: [
+            { locationId: 100, locationName: 'Northvale A', locationStatus: 'active', address: { street: '500 Ridgeway Ave E' } },
+            { locationId: 101, locationName: 'Northvale B', locationStatus: 'active', address: { street: '520 Ridgeway Ave E' } }
+        ]
+    }));
+    try {
+        const v = (await callInbound(app.port, INBOUND_AGENT, '+19056710220')).call_inbound.dynamic_variables;
+        assert.strictEqual(v.st_location_found, 'false');
+        assert.strictEqual(v.st_lookup_ok, 'true', 'the lookup worked; it is the number that is ambiguous');
+        assert.strictEqual(v.st_lookup_reason, 'ambiguous_location');
+        assert.strictEqual(v.st_needs_location, 'true');
+        assert.strictEqual(v.st_location_options, '500 Ridgeway Ave E | 520 Ridgeway Ave E');
+    } finally { app.close(); }
+});
+
+test('one source failing does not take the other down', async () => {
+    const app = await inboundApp(inboundMocks({
+        indexHits: [{
+            locationId: 42, locationName: 'Single Site', locationStatus: 'active',
+            address: { street: '1 A St' }
+        }],
+        searchThrows: true
+    }));
+    try {
+        const v = (await callInbound(app.port, INBOUND_AGENT, '+19056710220')).call_inbound.dynamic_variables;
+        assert.strictEqual(v.st_lookup_ok, 'true');
+        assert.strictEqual(v.st_location_id, '42', 'the index still resolved the site');
+        assert.strictEqual(v.st_contact_name, '', 'and the missing half is blank, not absent');
+    } finally { app.close(); }
+});
+
+test('one person recorded twice on the same site is one site, not two', async () => {
+    const app = await inboundApp(inboundMocks({
+        contacts: [
+            { contactId: 9, contactName: 'Dana Reyes', companyId: 4, companyName: 'Acme', locations: [locationRow()] },
+            { contactId: 10, contactName: 'Dana Reyes', companyId: 4, companyName: 'Acme', locations: [locationRow()] }
+        ]
+    }));
+    try {
+        const v = (await callInbound(app.port, INBOUND_AGENT, '+19056710220')).call_inbound.dynamic_variables;
+        assert.strictEqual(v.st_location_found, 'true');
+        assert.strictEqual(v.st_needs_location, 'false');
+        assert.strictEqual(v.st_location_id, '42');
+    } finally { app.close(); }
 });
 
 // ------------------------------------------------ escalation-complete idempotency
@@ -697,3 +790,4 @@ test('a FAILED send is not cached, so the Apps Script retry still gets through',
         assert.strictEqual(attempt, 2);
     } finally { server.close(); }
 });
+
