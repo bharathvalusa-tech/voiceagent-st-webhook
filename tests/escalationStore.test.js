@@ -383,6 +383,38 @@ test('a leg is still recorded when the inbound call is not in call_logs yet', as
 test('completion records the dispatch call ids the Apps Script reports', async () => {
     // The escalation's own record of what it dialled. Each leg is normally captured live
     // from its post-call webhook; this covers one that never arrived.
+    //
+    // SIX, not three. The ladder is six steps, and column V now holds call 3 onward as a
+    // comma-separated list instead of being overwritten, so a fully-exhausted chain reports
+    // every id it dialled. The loop is length-agnostic and must stay that way.
+    const fake = fakeSupabase({ chainExists: true });
+    const store = loadStore(fake);
+
+    const dialled = [
+        'call_out_1', 'call_out_2', 'call_out_3',
+        'call_out_4', 'call_out_5', 'call_out_6'
+    ];
+
+    await store.completeEscalationChain({
+        agent_id: OUTBOUND_AGENT,
+        inbound_call_id: 'call_inbound_1',
+        reason: 'exhausted',
+        response_call_ids: dialled
+    });
+
+    const merged = fake.calls.rpcs.map((r) => r.args.p_leg.outbound_call_id);
+    assert.deepStrictEqual(merged, dialled, 'every id merges, in dial order');
+    for (const r of fake.calls.rpcs) {
+        assert.strictEqual(r.args.p_inbound_call_id, 'call_inbound_1');
+        // Only the id — the outcome key belongs to whichever source knows it, and an empty
+        // patch must not blank what a live leg write already recorded.
+        assert.deepStrictEqual(Object.keys(r.args.p_leg), ['outbound_call_id']);
+    }
+});
+
+test('a row written before column V became a list still reports its three ids', async () => {
+    // Rows that predate the change hold one id in V. They report at most three, which is a
+    // floor rather than a ceiling — clara-lead-agent-server recovers the rest from Retell.
     const fake = fakeSupabase({ chainExists: true });
     const store = loadStore(fake);
 
@@ -393,14 +425,10 @@ test('completion records the dispatch call ids the Apps Script reports', async (
         response_call_ids: ['call_out_1', 'call_out_2', 'call_out_3']
     });
 
-    const merged = fake.calls.rpcs.map((r) => r.args.p_leg.outbound_call_id);
-    assert.deepStrictEqual(merged, ['call_out_1', 'call_out_2', 'call_out_3']);
-    for (const r of fake.calls.rpcs) {
-        assert.strictEqual(r.args.p_inbound_call_id, 'call_inbound_1');
-        // Only the id — the outcome key belongs to whichever source knows it, and an empty
-        // patch must not blank what a live leg write already recorded.
-        assert.deepStrictEqual(Object.keys(r.args.p_leg), ['outbound_call_id']);
-    }
+    assert.deepStrictEqual(
+        fake.calls.rpcs.map((r) => r.args.p_leg.outbound_call_id),
+        ['call_out_1', 'call_out_2', 'call_out_3']
+    );
 });
 
 test('completion with no reported ids still settles the chain', async () => {

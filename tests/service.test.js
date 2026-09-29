@@ -791,3 +791,138 @@ test('a FAILED send is not cached, so the Apps Script retry still gets through',
     } finally { server.close(); }
 });
 
+// ------------------------------------------- the two-line ServiceTrade job description
+//
+// Fixed shape, so a dispatcher scanning the ServiceTrade job list reads the same thing
+// every time:
+//
+//   [TEST][AFTER HOURS][INACTIVE LOCATION]
+//   Investigate no heat at unit 3, boiler locked out
+//
+// [AFTER HOURS] is unconditional — Adaptive creates jobs only on the after-hours
+// emergency path, so there is no office-hours branch to take.
+
+const describeJob = async (fields, candidates = [candidate()]) => {
+    const svc = matcherWith(candidates);
+    const result = await svc.createJobFromCallContext({
+        agent_id: OUTBOUND_AGENT, service_address: '9 Elmcrest Rd.', ...fields
+    });
+    assert.strictEqual(result.status, 'created');
+    return result.job.payload.description;
+};
+
+test('the job description is exactly two lines: tags, then the action', async () => {
+    const description = await describeJob({
+        call_summary: 'Caller reports no heat.',
+        job_action: 'Investigate',
+        job_summary: 'no heat at unit 3'
+    });
+
+    assert.deepStrictEqual(description.split('\n'), [
+        '[AFTER HOURS]',
+        'Investigate no heat at unit 3'
+    ]);
+});
+
+test('[TEST] moves from mid-prose onto the tag line', async () => {
+    // The Apps Script prefixes '[TEST] ' onto call_summary itself (code.gs), because Clara
+    // also speaks it aloud. It must land on line 1 here, not inside the sentence.
+    const description = await describeJob({
+        call_summary: '[TEST] Caller reports no heat.',
+        job_action: 'Investigate',
+        job_summary: 'no heat at unit 3'
+    });
+
+    const [tags, action] = description.split('\n');
+    assert.strictEqual(tags, '[TEST][AFTER HOURS]');
+    assert.strictEqual(action, 'Investigate no heat at unit 3');
+    assert.ok(!action.includes('[TEST]'), '[TEST] must never appear on line 2');
+});
+
+test('[INACTIVE LOCATION] lands on the tag line, after the hours tag', async () => {
+    const description = await describeJob(
+        { call_summary: 'no heat', job_action: 'Investigate', job_summary: 'no heat at unit 3' },
+        [candidate({ locationStatus: 'inactive' })]
+    );
+
+    assert.deepStrictEqual(description.split('\n'), [
+        '[AFTER HOURS][INACTIVE LOCATION]',
+        'Investigate no heat at unit 3'
+    ]);
+});
+
+test('all three tags can appear together, in a fixed order', async () => {
+    const description = await describeJob(
+        {
+            call_summary: '[TEST] Caller reports no heat.',
+            job_action: 'Troubleshoot',
+            job_summary: 'boiler lockout at unit 3'
+        },
+        [candidate({ locationStatus: 'inactive' })]
+    );
+
+    assert.strictEqual(description.split('\n')[0], '[TEST][AFTER HOURS][INACTIVE LOCATION]');
+});
+
+test('an active, non-test job carries a bare [AFTER HOURS] line', async () => {
+    const description = await describeJob({ call_summary: 'no heat', job_summary: 'no heat at unit 3' });
+    assert.strictEqual(description.split('\n')[0], '[AFTER HOURS]');
+});
+
+test('the caller name, phone and the old EMERGENCY banner are gone', async () => {
+    // The job is already on the caller's own location, and callerPhoneNumber is a field on
+    // the job record — repeating either in the description was noise.
+    const description = await describeJob({
+        customer_name: 'Jane Doe',
+        from_number: '+14169012663',
+        call_summary: 'no heat',
+        job_summary: 'no heat at unit 3'
+    });
+
+    assert.ok(!description.includes('Jane Doe'));
+    assert.ok(!description.includes('+14169012663'));
+    assert.ok(!description.includes('EMERGENCY - TECH APPROVED'));
+});
+
+test('the verb falls back to Troubleshoot on a fault-code summary', async () => {
+    // No job_action from the dispatch agent — an older agent deploy, or an analyzer miss.
+    for (const summary of ['Boiler is locked out', 'Unit showing error code E4', 'Alarm sounding']) {
+        const description = await describeJob({ call_summary: summary });
+        assert.strictEqual(description.split('\n')[1].split(' ')[0], 'Troubleshoot', summary);
+    }
+});
+
+test('the verb falls back to Investigate on everything else', async () => {
+    for (const summary of ['No heat in the building', 'Water on the floor near the unit']) {
+        const description = await describeJob({ call_summary: summary });
+        assert.strictEqual(description.split('\n')[1].split(' ')[0], 'Investigate', summary);
+    }
+});
+
+test('a supplied job_action wins over the derivation, and only the two values are accepted', async () => {
+    const forced = await describeJob({ call_summary: 'Boiler is locked out', job_action: 'Investigate' });
+    assert.strictEqual(forced.split('\n')[1].split(' ')[0], 'Investigate');
+
+    // Anything else falls through to the derivation rather than reaching ServiceTrade.
+    const junk = await describeJob({ call_summary: 'No heat in the building', job_action: 'Fix it' });
+    assert.strictEqual(junk.split('\n')[1].split(' ')[0], 'Investigate');
+});
+
+test('the summary falls back to the first sentence, capped at 100 characters', async () => {
+    const long = 'A'.repeat(140);
+    const description = await describeJob({ call_summary: `${long}. Second sentence is dropped.` });
+    const line2 = description.split('\n')[1];
+
+    assert.ok(!line2.includes('Second sentence'), 'only the first sentence is used');
+    assert.ok(line2.length <= 'Investigate '.length + 100, `line 2 was ${line2.length} chars`);
+});
+
+test('a job with no summary at all still produces two lines', async () => {
+    const description = await describeJob({ call_summary: '' });
+    assert.deepStrictEqual(description.split('\n'), ['[AFTER HOURS]', 'Investigate emergency service request']);
+});
+
+test('trailing punctuation is stripped from the summary, not carried into the job', async () => {
+    const description = await describeJob({ call_summary: 'no heat', job_summary: 'no heat at unit 3...' });
+    assert.strictEqual(description.split('\n')[1], 'Investigate no heat at unit 3');
+});

@@ -282,6 +282,12 @@ derive it, since all three cases used to read as `no job — tech declined`.
 
   *(Corrected 2026-09-24: this said four steps, `tech → John → Alex → John`, and that a
   phoneless row skipped to step 3. Verified against the live `Code.gs`.)*
+
+  **Every step is on the record.** The sheet still has three call-id columns, but column V
+  holds call 3 **onward as a comma-separated list** rather than being overwritten, so a
+  fully-exhausted chain keeps all six ids. Read it with `responseCallIds(rowData)`, write it
+  with `appendResponseCallId()`; a row written before the change holds a single id and parses
+  as a one-element list. The sheet grid is unchanged — no new column, no migration.
 - **Test mode (`CONFIG.TEST_OVERRIDE_NUMBERS` / `TEST_OUTBOUND_NUMBER`):** a call
   arriving **from** a listed number places exactly **one** dispatch call, to
   `TEST_OUTBOUND_NUMBER`, and the ladder does not run — `maxEscalationAttempts()`
@@ -430,7 +436,7 @@ outbound_call_id, is_job_created, job_number, outcome, terminal }`. GAS:
 | S | **make_call** | GAS | row create (=emergency); → false on answered / max / cooldown / job-created |
 | T | response_call_id_1 | GAS | after 1st escalation call |
 | U | response_call_id_2 | GAS | after 2nd escalation call |
-| V | response_call_id_3 | GAS | after 3rd/later escalation call |
+| V | response_call_id_3 | GAS | after 3rd/later escalation call — a **comma-separated list**, calls 3-6 oldest first |
 | W | call_decline_counter | GAS | each step advance |
 | X | last_call_time | GAS | after each escalation call |
 | Y | **escalation_complete** | GAS | answered / max-attempts / cooldown / job-created |
@@ -449,6 +455,12 @@ call1 - no answer
 call2 - answered
 call2 - no job — tech declined
 ```
+
+`callN` runs 1-6. The dial-result line is written per tick by `checkAnsweredAndComplete`; the
+job-result line is labelled by `handleJobUpdate`, which finds the reporting call's **position**
+in `responseCallIds(rowData)`. That lookup is why column V had to stop overwriting: a job
+result arriving after the next step had been dialled used to match nothing and was appended
+with no `callN` at all.
 
 ## 7.1 The dashboard record (`escalation_chains`)
 
