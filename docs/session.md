@@ -846,6 +846,19 @@ the CALLER's address, is real in code but **has never once fired in production**
 - **The helper must never throw.** The main loop's per-call `catch` swallows and continues,
   leaving `email_sent = 0` — the same silent infinite retry.
 
+### The endpoint was tested live, 2026-09-29
+
+`GET https://adaptive-climate.vercel.app/api/assignments` returned a real technician:
+
+```
+name  "Shaquille Donalds"   email "sd@adaptiveclimates.ca"   phone "+16476326248"
+job   "Emergency Service Call Job #46705275"
+totalAssignments 1   totalAppointments 112
+```
+
+The second `techs` entry is the API's null padding (`servicetrade_client.py:186-193`); the
+helper skips it rather than indexing `[0]`.
+
 ### Verification
 
 Sixteen cases against the extracted function with `UrlFetchApp` stubbed — other tenant,
@@ -857,13 +870,34 @@ entry and produced `jm@adaptiveclimates.com,sd@adaptiveclimates.ca`.
 
 ### Outstanding
 
-- **The fresh ServiceTrade login per request is now more pressing.**
-  `adaptive-climate-api/api/index.py:25` logs in on every `/api/assignments` call, and this
-  change adds calls. If its `SERVICETRADE_USERNAME` equals `st_username` on the Adaptive
-  `servicetrade_tokens` rows, it is invalidating the session the live call path uses,
-  mid-emergency — the 2026-08-24 entry records the Edge Function being built to *reuse* a
-  session for exactly that reason. **Still unverified**; no `.env` exists locally, the value is
-  a Vercel project env var.
+- ~~**The fresh ServiceTrade login per request.**~~ **RESOLVED 2026-09-29 — the collision does
+  not exist.** This had been outstanding since 2026-09-28 as "step 0a".
+
+  Both Adaptive `servicetrade_tokens` rows authenticate as ServiceTrade user **`Clara_AI`**:
+  `agent_c4123a0589c456c9f19e369340` ("Adaptive Climates Inc.(Outbound)") and
+  `agent_efbe503faedf1bf516f961979f` ("Adaptive Climates Inc."). The Vercel env var on
+  `adaptive-climate-api` is unreadable from this account, so it was measured instead.
+
+  **The experiment.** ServiceTrade is one session per user, and a dead session answers `404`
+  on `GET /api/auth` rather than `401` (`docs/servicetrade-session-health.md`). The outbound
+  row's stored `PHPSESSID` was issued 2026-09-26 and still answered `200`. Calling the deployed
+  `/api/assignments` and re-checking gave `200` again — **200 → call → 200**. Had the endpoint
+  logged in as `Clara_AI` it would have taken a new session and killed that one.
+
+  So `adaptive-climate-api` authenticates as some other ServiceTrade user, and adding one call
+  per Adaptive emergency does not touch the dispatch path's session.
+
+  **Do not "fix" this by pointing the service at `Clara_AI`.** It gains nothing — the endpoint
+  is already Adaptive-only via the hardcoded `jobId: '2456684740761729'`
+  (`servicetrade_client.py:45`) plus the `'Emergency Service Call'` name filter (`:132`), not
+  via which user authenticates. Switching would *create* the collision, because `api/index.py:25`
+  logs in on every request. Raised and rejected on 2026-09-29.
+
+- **The Main Router row's ServiceTrade session is dead and that is fine.**
+  `agent_efbe503faedf1bf516f961979f` answers `404` on `GET /api/auth`, `last_modified`
+  2026-09-11, `last_auth_status` null, `credentials_fingerprint` null — it has never been
+  health-checked. Adaptive's ServiceTrade work all runs under the outbound agent's row, which is
+  alive and maintained. Confirmed unused, 2026-09-29. Not a fault.
 - **Confirm the send really is early.** The whole design rests on it. Compare Adaptive post-call
   emails in SendGrid (recipient `ch@adaptiveclimates.ca`, subject `📞 New Call Received from …`)
   against the same call's `start_timestamp`. Not measured — the browser extension dropped
