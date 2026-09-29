@@ -482,7 +482,16 @@ router.post('/retell-outbound', async (req, res) => {
                 //
                 // Absent on any row GAS wrote before it carried the column, and on any call
                 // where nothing resolved. Then the matcher runs exactly as it does today.
-                location_id: vars.st_location_id || vars.location_id || ''
+                location_id: vars.st_location_id || vars.location_id || '',
+                // The two halves of line 2 of the ServiceTrade job description, set by the
+                // dispatch agent's post-call analysis. Same `custom ?? collected` shape as
+                // servicetrade_job_created above, because they arrive by the same route.
+                //
+                // Both are optional on purpose: contextJobService derives a verb and a
+                // one-line summary from call_summary when either is missing, so an agent
+                // deploy without these variables still produces the fixed two-line shape.
+                job_action: custom.job_action ?? collected.job_action,
+                job_summary: custom.job_summary ?? collected.job_summary
             });
         } catch (createErr) {
             console.error(`[retell-outbound] job creation threw for call ${callId}: ${createErr.message || createErr}`);

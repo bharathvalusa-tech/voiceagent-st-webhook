@@ -960,6 +960,198 @@ account; and `asLocationId` rejecting `{{mustache}}`, a company name and `1.4954
 - **`caller_details` returning false is ignored.** The prompt only calls that tool after a
   successful lookup, so a false there is an absence wearing a verdict's clothes.
 
+## Session 2026-09-28 — six call ids, dial-ordered legs, a named job badge, a two-line job description
+
+Four asks on the Adaptive emergency-dispatch flow, plus one defect found while verifying
+them. Everything below was read or executed, not assumed.
+
+### 1. Column V holds calls 3-6 as a list; the sheet grid is untouched
+
+`MAX_ESCALATION_ATTEMPTS = 6` but the sheet has three id columns, and calls 4, 5 and 6 all
+overwrote column V. Two transcripts per exhausted chain were lost.
+
+**Before:** `V = call_2ef2aeb…`, replaced by each later step.
+**After:** `V = call_2ef2aeb…,call_9a0e76f…,call_8c73f65…` — call 3 onward, oldest first.
+**Why:** appending inside the existing cell adds the missing ids without a live sheet
+operation that would take the whole escalation loop down if mistimed.
+
+Two helpers in `code.gs`, next to `SHEET_NUM_COLUMNS`: `responseCallIds(rowData)` returns
+the dial-ordered list, `appendResponseCallId(sheet, rowIndex, callId)` appends one id in
+place. Eight call sites changed. A row written before the change holds one id in V and
+parses as a one-element list, so there is **no migration and no header change**.
+
+**What it actually buys — legs 4-6 already reached the dashboard.** `recordEscalationLeg`
+fires inside `notifySheet` on every dispatch call (`src/routes/webhook/retellOutbound.js:140`),
+so Supabase has had all six for a while. The six ids fix two other things:
+
+- the **client email** timeline, which reads only `response_call_ids` from the sheet;
+- the **`callN` on the job-result line**. `handleJobUpdate` now finds the reporting call's
+  POSITION in `responseCallIds(rowData)`. Before, it matched against rc1/rc2/rc3, and once
+  the minute-tick had dialled the next step and overwritten V a late job_update matched
+  nothing — the outcome was appended with no label, and `✅ JOB CREATED` carried no step
+  suffix. The old `(counter >= 3 ? counter : 3)` guess is gone with it; it emitted a literal
+  `call3` whenever the counter cell was blank.
+
+Column AA already emitted `call1`…`call6` on the **dial-result** lines (`code.gs`
+`checkAnsweredAndComplete`), bounded by `Math.min(declineCounter + 1, maxAttempts)`. That
+half was never broken.
+
+**Verified, not assumed** — nothing downstream caps legs at three or four:
+`escalation_merge_leg` appends unbounded keyed on `outbound_call_id`; `escalationStore.js`
+loops `for (const id of ids)`; clara's Retell enrichment is a bare `Promise.all` over
+`legs.map`; `EscalationCallsSection.tsx` maps `data.calls` whole. The client email was
+**executed** with six ids and rendered six blocks, each with summary and transcript.
+
+### 2. Legs are sorted into dial order before they are matched to steps
+
+Found while verifying §1, and the more serious of the two.
+
+`clara-lead-agent-server/src/api/services/escalation-timeline.ts` resolves a `callN` line to
+a leg by **array position** — `legs[line.step - startStep]`. `legs` was `asArray(chain.calls)`
+raw, and there was **no `sort(`** anywhere in `escalation.service.ts` or
+`escalation-projection.ts`. `escalation_merge_leg` appends in **arrival** order, and a leg
+whose webhook was lost is rediscovered from Retell later and appended at the **end**.
+
+So `calls` could be `[1,2,4,5,6,3]` and every outcome from step 3 on was filed under the
+wrong leg — silently, because each index still resolved to *some* leg so `unresolved_step`
+never fired. §1 does not fix this: the sheet's ids make a missing leg **present**, not
+**ordered**.
+
+`inDialOrder()` now lives in `escalation-projection.ts` (Prisma-free, so it is unit-tested)
+and is applied on the read path and before `rebuildDerived` writes `calls` back. It sorts by
+`start_timestamp`, which Retell supplies per leg; legs not yet enriched have none, keep their
+relative order, and sort last so they can never displace a leg whose position is known.
+
+### 3. The job description is two lines
+
+**Before:** `[EMERGENCY - TECH APPROVED][INACTIVE LOCATION]: Jane Doe (+1416…) reported <whole call summary>`
+**After:**
+```
+[TEST][AFTER HOURS][INACTIVE LOCATION]
+Investigate no heat at unit 3, boiler locked out
+```
+
+Caller name and phone are dropped — the job is on the caller's own location and the phone is
+already on the job record via `callerPhoneNumber`.
+
+`[AFTER HOURS]` is **constant** (owner's decision, 2026-09-28). Adaptive creates jobs only on
+the after-hours emergency path, so there is no branch to take. Worth recording because the
+obvious model was wrong: `src/routes/webhook/retell.js:91-94` is Braconier's hours rule and it
+keys on **`current_node`**, a Retell conversation-flow node label — **not** an inbound agent
+name. Adaptive's job-creation path has neither.
+
+Line 2 comes from two new post-call variables on the outbound dispatch agent
+`agent_c4123a0589c456c9f19e369340`: `job_action` (`Investigate` | `Troubleshoot`) and
+`job_summary`. **Both are dashboard-only and appear in no diff.** When either is missing —
+older agent deploy, analyzer failure — `contextJobService` derives them from `call_summary`
+alone, so the shape holds regardless.
+
+`[TEST]` moved. `code.gs` still prefixes `[TEST] ` onto `call_summary` itself (Clara speaks it
+aloud, and other consumers read it), so `contextJobService` strips a leading `[TEST]` off the
+summary and re-emits it on the tag line.
+
+### 4. The dashboard job badge names the approver
+
+`JOB CREATED #50989794` → `JOB CREATED #50989794 - John McLean`. One line in
+`claim-craft-ai-web-73/src/components/EscalationCallsSection.tsx`, on a branch off
+`origin/main` (local `main` was 77 commits behind).
+
+**The name is whoever APPROVED the job, not the nominal on-call technician** — steps 4-6 ring
+John McLean and Alex Kovachev, so a chain the technician never answered reads their name. It
+already flowed end to end: `getCallTarget` returns `{ phone, name }` for every step,
+`makeRetellCall` sends it as `contact_name`, clara reads it back off Retell, and the frontend
+type already declared `contact_name: string | null`.
+
+`LatestLeads.tsx` renders the same badge at **list** level where no leg is in scope. Left
+unchanged, deliberately.
+
+### 5. The technician CC — written, blocked on a deploy we cannot do
+
+The target is the **"Clara - Post Call Emails"** Apps Script (`1duA-NX…`), not
+`emailNotificationService`. The escalation-complete email in this repo is unchanged.
+
+Patch written to `.claude/patches/clara-postcall-oncall-tech-cc.md` (paste-only; that script
+is not in git and its lines 2-8 hold live Supabase/SendGrid/Twilio credentials).
+
+**It needs `?at=` on `adaptive-climate-api` first, and that is not a convenience.**
+`/api/assignments` answers *who is on call right now*. The script runs on a rolling 24-hour
+trigger and only once `gpt_status === 2`, so it commonly sends **hours** after the call —
+asking "who is on call now" then CCs whoever is on duty at send time, on someone else's call.
+
+`servicetrade_client.py` and `api/index.py` now take `at=` and emit `windowStart`/`windowEnd`.
+Verified offline against synthetic rota windows: `at` selects the containing window, is echoed
+as `now`, returns empty when no window covers the instant, and reads a naive value as UTC.
+Unset still means now, so `vercel-webhook-integration` is unaffected and needs no redeploy.
+
+**The deploy is the owner's action.** `adaptive-climate-api` has **no git remote** and deploys
+to Vercel team `mahees-projects-2df6704a`, which this account cannot reach.
+
+**Why the helper checks for `windowStart`.** The deployed service ignores unknown query
+parameters, so an undeployed `?at=` fails *silently* — it answers for "now". `windowStart` is
+emitted only by the new build, so its absence is the tell. No `windowStart`, no CC. That makes
+the paste safe to land before the deploy.
+
+### Verification
+
+`npm test` here: **191 pass, 0 fail** (was 171). `npm run build:syntax` and
+`npm run build:smoke` both pass. `clara-lead-agent-server`: **59 pass, 0 fail** (was 54),
+`npm run typecheck` clean. `claim-craft-ai-web-73`: `tsc --noEmit` clean.
+
+New coverage: a driven six-step chain leaving a four-element list in V; all six `callN` labels
+in column AA; `notifyEscalationComplete` emitting six ids in dial order; `handleJobUpdate`
+labelling V position 2 as `call4` in both the prefix and suffix forms; a legacy one-id row;
+`isOwnEscalationCallId` finding an id mid-list and rejecting a prefix of one; twelve
+description cases; and five `inDialOrder` cases including the `[1,2,4,5,6,3]` shape that used
+to file `call3` onto leg 4.
+
+The two pre-existing inactive-tag assertions in `tests/service.test.js` still hold unchanged —
+the plan expected them to need reshaping and they did not.
+
+### Deliberate — do not "fix" without asking
+
+- **`[AFTER HOURS]` is unconditional.** Not a missing branch. See §3.
+- **The escalation-complete email in this repo does NOT CC the technician.** That was scoped
+  to the "Clara - Post Call Emails" script instead (owner's decision, 2026-09-28). No
+  `tech_email`, no `tech_name`, no `extraCc` anywhere in `src/`.
+- **Column V's header string stays `response_call_id_3`.** Renaming it is a live sheet edit
+  for no functional gain; the `COLUMNS` comment is the contract.
+
+### Outstanding
+
+- **`rebuildDerived` is a read-modify-write on `calls`.**
+  `clara-lead-agent-server/src/api/services/escalation.service.ts` does SELECT → compute →
+  whole-array `UPDATE` across three round trips with no row lock, bypassing
+  `escalation_merge_leg` — the exact pattern `escalation_chains.ts` says must not happen. A
+  leg merged by this service in that gap is dropped. **It self-heals**: the next `reconcile`
+  rediscovers it from Retell (`discoverLegs` runs first) and merges it back. Residual exposure
+  is a leg dropped by the LAST reconcile a chain ever gets, since the sweeper stops 24h after
+  `completed_at`. A six-step ladder runs ~25 minutes with six leg-writes, so the window is hit
+  about twice as often as at three. **Recorded, not fixed** (owner's decision, 2026-09-28) —
+  `inDialOrder` removes the mislabelling it used to cause. `reconcile`'s doc comment used to
+  assert the opposite and has been corrected.
+- **A phoneless row opens at step 4** but stores that call in column T, so both writers label
+  it `call1`. Position-based matching inherits the same off-by-three. Pre-existing.
+- **The terminal "escalation exhausted" line carries no `callN`.** Pre-existing.
+- **`vercel-webhook-integration/api/adaptiveclimate.py` disables TLS verification**
+  (`check_hostname = False`, `verify_mode = ssl.CERT_NONE`). Verified unnecessary — the
+  certificate validates.
+- **`adaptive-climate-api/api/index.py` logs into ServiceTrade on every request.** The
+  2026-08-24 entry records that the Edge Function was deliberately built to *reuse* a session
+  because "logging in as the mirror agent could kill the session the live call path is using,
+  mid-emergency". **Unverified whether this is live**: compare that service's
+  `SERVICETRADE_USERNAME` against `st_username` on the two Adaptive `servicetrade_tokens` rows.
+  No `.env` exists locally — the value is a Vercel project env var. If they match this
+  outranks everything above.
+- **Dashboard ergonomics at six legs**, all pre-existing: `expandedId` is a single scalar so
+  one transcript opens at a time; a leg with a null `start_timestamp` sorts to the top of the
+  rendered timeline (`toTime` maps null to `0`); and `chain_state === "active"` hides every
+  leg for the ~25 minutes a six-step ladder runs, twice the blackout of a three-step chain.
+- **Not applied, paste-only:** `.claude/patches/clara-postcall-oncall-tech-cc.md`, and the
+  pre-existing `.claude/patches/gas-location-id.md`. The latter needs the sheet widened to 31
+  columns first; nothing here widens it, but both land in the same `code.gs` paste.
+
+---
+
 ## Session 2026-09-29 — the Adaptive on-call technician on the post-call client email
 
 Adaptive's post-call client email went to two fixed addresses and never to the technician who

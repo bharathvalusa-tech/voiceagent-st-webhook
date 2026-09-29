@@ -639,3 +639,196 @@ test('the second call goes back to the same technician, not to John', skipIfNoAp
     assert.strictEqual(env.grid[0][C.CALL_DECLINE_COUNTER], 2);
 });
 
+// ------------------------------------------- six call ids in three id columns
+//
+// The ladder is six steps and the sheet has three id columns. Column V now holds call 3
+// ONWARD as a comma-separated list instead of being overwritten by each later step, so a
+// fully-exhausted chain keeps every id it dialled.
+
+// Hands back a fresh call id per dial so a driven chain has six distinct ones, and reports
+// every get-call as an unanswered ring so the ladder always advances.
+const ladderRouter = () => {
+    let placed = 0;
+    return (url) => {
+        if (url.includes('st-match-location')) {
+            return {
+                code: 200,
+                body: JSON.stringify({
+                    data: {
+                        status: 'matched', matched: true, locationId: 6398701,
+                        locationName: '2213256 Ontario Ltd.', locationStatus: 'active',
+                        matchedAddress: '9 Elmcrest Rd., Georgetown, ON, L7G 4R8'
+                    }
+                })
+            };
+        }
+        if (url.includes('create-phone-call')) {
+            placed += 1;
+            return { code: 201, body: JSON.stringify({ call_id: `call_out_${placed}` }) };
+        }
+        if (url.includes('get-call')) {
+            return {
+                code: 200,
+                body: JSON.stringify({ call_status: 'ended', disconnection_reason: 'dial_no_answer' })
+            };
+        }
+        if (url.includes('sendgrid')) return { code: 202, body: '' };
+        if (url.includes('st-escalation-complete')) return { code: 200, body: '{}' };
+        return { code: 200, body: '{}' };
+    };
+};
+
+// One escalation tick. The delay gate is real (DELAY_MINUTES = 5), so back-date the last
+// call time rather than waiting.
+const tick = (env) => {
+    env.grid[0][C.LAST_CALL_TIME] = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    env.sandbox.processEscalationRowWithEmail(env.sheet, 2, env.grid[0]);
+};
+
+test('a six-step chain keeps every id: T, U, then a four-element list in V', skipIfNoAppsScript(), () => {
+    // A real caller, not a test number — test callers are capped at one call.
+    const env = loadAppsScript({
+        rows: [emergencyRow({ FROM_NUMBER: '+14167770000' })],
+        fetchHandler: ladderRouter()
+    });
+
+    for (let i = 0; i < 7; i++) tick(env);
+
+    const row = env.grid[0];
+    assert.strictEqual(row[C.RESPONSE_CALL_ID_1], 'call_out_1');
+    assert.strictEqual(row[C.RESPONSE_CALL_ID_2], 'call_out_2');
+    assert.strictEqual(
+        row[C.RESPONSE_CALL_ID_3],
+        'call_out_3,call_out_4,call_out_5,call_out_6',
+        'calls 4, 5 and 6 must be appended to V, not overwrite it'
+    );
+    // deepEqual, not deepStrictEqual: the array is built inside the vm realm, so its
+    // prototype is not this realm's Array.prototype.
+    assert.deepEqual(
+        env.sandbox.responseCallIds(row),
+        ['call_out_1', 'call_out_2', 'call_out_3', 'call_out_4', 'call_out_5', 'call_out_6']
+    );
+    assert.strictEqual(row[C.CALL_DECLINE_COUNTER], 6, 'the ladder is exhausted');
+});
+
+test('the outcome trail labels all six steps', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow({ FROM_NUMBER: '+14167770000' })],
+        fetchHandler: ladderRouter()
+    });
+
+    for (let i = 0; i < 7; i++) tick(env);
+
+    const trail = String(env.grid[0][C.OUTCOME]);
+    for (const step of [1, 2, 3, 4, 5, 6]) {
+        assert.match(trail, new RegExp(`call${step} - `), `column AA must carry call${step}`);
+    }
+});
+
+test('notifyEscalationComplete reports six ids, in dial order', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow({
+            FROM_NUMBER: '+14167770000',
+            RESPONSE_CALL_ID_1: 'call_out_1',
+            RESPONSE_CALL_ID_2: 'call_out_2',
+            RESPONSE_CALL_ID_3: 'call_out_3,call_out_4,call_out_5,call_out_6'
+        })],
+        fetchHandler: router('matched')
+    });
+
+    env.sandbox.notifyEscalationComplete(env.sheet, 2, 'exhausted');
+
+    const post = env.fetches.find((f) => f.url.includes('st-escalation-complete'));
+    assert.ok(post, 'the completion must be broadcast');
+    assert.deepStrictEqual(
+        JSON.parse(post.options.payload).response_call_ids,
+        ['call_out_1', 'call_out_2', 'call_out_3', 'call_out_4', 'call_out_5', 'call_out_6']
+    );
+});
+
+test('a row written before the change still parses as one id in V', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
+    const legacy = emergencyRow({
+        RESPONSE_CALL_ID_1: 'call_out_1',
+        RESPONSE_CALL_ID_2: 'call_out_2',
+        RESPONSE_CALL_ID_3: 'call_out_3'
+    });
+
+    assert.deepEqual(
+        env.sandbox.responseCallIds(legacy),
+        ['call_out_1', 'call_out_2', 'call_out_3']
+    );
+    // And a row that never got past call 1.
+    assert.deepEqual(
+        env.sandbox.responseCallIds(emergencyRow({ RESPONSE_CALL_ID_1: 'call_out_1' })),
+        ['call_out_1']
+    );
+});
+
+test('handleJobUpdate labels the second id in V as call4, not call3', skipIfNoAppsScript(), () => {
+    // The case the shared slot used to lose: call 4 reports its job result after the tick
+    // has already dialled call 5. Its id is still on the row, so the step is still known.
+    const env = loadAppsScript({
+        rows: [emergencyRow({
+            RESPONSE_CALL_ID_1: 'call_out_1',
+            RESPONSE_CALL_ID_2: 'call_out_2',
+            RESPONSE_CALL_ID_3: 'call_out_3,call_out_4,call_out_5',
+            CALL_DECLINE_COUNTER: 5
+        })],
+        fetchHandler: router('matched')
+    });
+
+    env.sandbox.handleJobUpdate({
+        inbound_call_id: 'call_inbound_1',
+        outbound_call_id: 'call_out_4',
+        is_job_created: true,
+        job_number: '50989794',
+        outcome: 'job created'
+    });
+
+    // A created job carries the step as a suffix: "… — tech approved (call4)".
+    const trail = String(env.grid[0][C.OUTCOME]);
+    assert.match(trail, /JOB CREATED #50989794 — tech approved \(call4\)/);
+    assert.ok(!/\(call3\)/.test(trail), 'and never mislabelled call3');
+});
+
+test('handleJobUpdate prefixes a declined call4 result with call4 - ', skipIfNoAppsScript(), () => {
+    // The other half of the same fix: a non-created outcome takes the prefix form, and it
+    // was the one that came out bare whenever the shared slot had already moved on.
+    const env = loadAppsScript({
+        rows: [emergencyRow({
+            RESPONSE_CALL_ID_1: 'call_out_1',
+            RESPONSE_CALL_ID_2: 'call_out_2',
+            RESPONSE_CALL_ID_3: 'call_out_3,call_out_4,call_out_5',
+            CALL_DECLINE_COUNTER: 5
+        })],
+        fetchHandler: router('matched')
+    });
+
+    env.sandbox.handleJobUpdate({
+        inbound_call_id: 'call_inbound_1',
+        outbound_call_id: 'call_out_4',
+        is_job_created: false,
+        outcome: 'no job — tech declined'
+    });
+
+    assert.match(String(env.grid[0][C.OUTCOME]), /call4 - no job — tech declined/);
+});
+
+test('isOwnEscalationCallId finds an id buried mid-list in V', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow({
+            RESPONSE_CALL_ID_1: 'call_out_1',
+            RESPONSE_CALL_ID_2: 'call_out_2',
+            RESPONSE_CALL_ID_3: 'call_out_3,call_out_4,call_out_5'
+        })],
+        fetchHandler: router('matched')
+    });
+
+    for (const id of ['call_out_1', 'call_out_2', 'call_out_3', 'call_out_4', 'call_out_5']) {
+        assert.strictEqual(env.sandbox.isOwnEscalationCallId(env.sheet, id), true, `${id} is ours`);
+    }
+    assert.strictEqual(env.sandbox.isOwnEscalationCallId(env.sheet, 'call_someone_else'), false);
+    // A prefix of a real id must not match — the split is on commas, not a substring test.
+    assert.strictEqual(env.sandbox.isOwnEscalationCallId(env.sheet, 'call_out_'), false);
+});
