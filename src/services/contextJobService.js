@@ -2,6 +2,61 @@ const { createJob, getAuthToken } = require('../controllers/serviceTradeControll
 const { findCustomerWithConfidence } = require('./customerMatchingService');
 const serviceTradeService = require('./serviceTradeService');
 
+// ---------------------------------------------------------------------------------
+// Job description shape.
+//
+// The ServiceTrade job description is exactly two lines: flags on line 1, the action
+// verb and the one-line issue on line 2. Fixed rather than free prose, so a dispatcher
+// scanning the job list in ServiceTrade reads the same shape every time.
+//
+//   [TEST][AFTER HOURS][INACTIVE LOCATION]
+//   Investigate no heat at unit 3, boiler locked out
+//
+// `[AFTER HOURS]` is unconditional: Adaptive creates jobs only on the after-hours
+// emergency path, so there is no office-hours branch to take. `[TEST]` and
+// `[INACTIVE LOCATION]` appear only when they apply. `[TEST]` is how test jobs are
+// found and deleted from the production ServiceTrade account, so it must survive.
+// ---------------------------------------------------------------------------------
+
+// Fault signals that mean the technician is chasing a code the equipment already
+// reported, rather than opening an unexplained problem. Only consulted when the
+// dispatch agent did not supply `job_action` itself.
+const TROUBLESHOOT_RE = /\b(error code|fault code|alarm|lockout|locked out|not responding|control board|thermostat)\b/i;
+
+const firstSentence = (text) => {
+    const match = String(text || '').match(/^[^.!?\n]+/);
+    return match ? match[0].trim() : '';
+};
+
+const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim().replace(/[.!?,;:]+$/, '').trim();
+
+/**
+ * `Investigate` or `Troubleshoot`, nothing else. The outbound dispatch agent supplies
+ * `job_action` as a post-call variable; the derivation is the fallback for an older agent
+ * deploy or an analyzer failure, so the two-line shape holds even when the variable never
+ * arrives.
+ */
+const resolveJobAction = (jobAction, callSummary) => {
+    const supplied = String(jobAction || '').trim();
+    if (/^troubleshoot$/i.test(supplied)) return 'Troubleshoot';
+    if (/^investigate$/i.test(supplied)) return 'Investigate';
+    return TROUBLESHOOT_RE.test(String(callSummary || '')) ? 'Troubleshoot' : 'Investigate';
+};
+
+/**
+ * The issue as one action-and-object phrase. Supplied by the dispatch agent as
+ * `job_summary`; the fallback is the first sentence of the call summary, capped at 100
+ * characters so a rambling transcript cannot turn line 2 into a paragraph.
+ */
+const resolveJobSummary = (jobSummary, callSummary) => {
+    const supplied = tidy(jobSummary);
+    if (supplied) return supplied;
+
+    const sentence = tidy(firstSentence(callSummary));
+    if (!sentence) return 'emergency service request';
+    return sentence.length > 100 ? tidy(sentence.slice(0, 100)) : sentence;
+};
+
 /**
  * The location the CALLER confirmed out loud, resolved straight from its id.
  *
@@ -201,7 +256,9 @@ async function createJobFromCallContext(fields) {
         call_id,
         location_name,
         company_name,
-        location_id
+        location_id,
+        job_action,
+        job_summary
     } = fields || {};
 
     // Same auth + confident-location resolution the pre-flight gate uses, so the
@@ -223,14 +280,20 @@ async function createJobFromCallContext(fields) {
     const selected = { locationId: match.locationId, locationName: match.locationName, tier: match.tier };
     const isInactive = match.locationStatus === 'inactive';
 
-    // Preserve the caller's/alarm's issue text verbatim in the job description.
-    // A deactivated location is tagged in the description too, so the flag is visible
-    // inside ServiceTrade itself and not only in our email and sheet.
-    const name = (customer_name || '').trim() || 'Unknown person';
-    const phonePart = from_number ? ` (${from_number})` : '';
-    const issue = (call_summary || '').trim() || 'emergency service request';
-    const inactiveTag = isInactive ? '[INACTIVE LOCATION]' : '';
-    const description = `[EMERGENCY - TECH APPROVED]${inactiveTag}: ${name}${phonePart} reported ${issue}`;
+    // Two lines, always: flags, then the action and the issue. See the block comment on
+    // TROUBLESHOOT_RE above for the shape and why each tag is there.
+    //
+    // The Apps Script prefixes `[TEST] ` onto the call summary itself (code.gs:2167-2168)
+    // because Clara also speaks it aloud. Strip it here and re-emit it on the tag line, so
+    // the marker lands where a dispatcher looks instead of mid-prose.
+    const rawSummary = (call_summary || '').trim();
+    const isTest = /^\[TEST\]\s*/i.test(rawSummary);
+    const issueSource = rawSummary.replace(/^\[TEST\]\s*/i, '').trim();
+
+    const tags = `${isTest ? '[TEST]' : ''}[AFTER HOURS]${isInactive ? '[INACTIVE LOCATION]' : ''}`;
+    const action = resolveJobAction(job_action, issueSource);
+    const summary = resolveJobSummary(job_summary, issueSource);
+    const description = `${tags}\n${action} ${summary}`;
 
     const job = await createJob(
         {

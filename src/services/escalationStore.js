@@ -265,9 +265,11 @@ async function completeEscalationChain(body = {}) {
         // webhook; this closes the case where one of those never arrived, using the
         // escalation's own record of what it dialled.
         //
-        // NOT a complete list: the sheet has three id slots and the third is reused from
-        // the third attempt onward, so a four-attempt chain reports only three ids. It is
-        // a floor, not a ceiling — clara-lead-agent-server reconciles against Retell for
+        // Complete since the Apps Script started appending: columns T and U hold calls 1
+        // and 2, and column V holds call 3 onward as a comma-separated list, so a
+        // six-attempt chain reports all six ids in dial order. Rows written before that
+        // change carry a single id in V and report at most three — for those this is a
+        // floor, not a ceiling, and clara-lead-agent-server reconciles against Retell for
         // the rest. The merge is keyed on outbound_call_id, so re-recording a leg already
         // captured live is a no-op rather than a duplicate.
         const ids = Array.isArray(body.response_call_ids) ? body.response_call_ids : [];
