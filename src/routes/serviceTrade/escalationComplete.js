@@ -205,7 +205,16 @@ router.post('/st-escalation-complete', async (req, res) => {
 
         // The Apps Script gave up waiting for a job result. The client email still goes
         // (it may lack a job number), but staff need to know the write-back path failed.
-        if (jobResultMissing) {
+        //
+        // NOT on a test row. `test_email` is only ever set for a CONFIG.TEST_OVERRIDE_NUMBERS
+        // caller, and a test deliberately leaves calls unanswered — so the backstop fires
+        // routinely and would page three people about a working system every time someone
+        // runs a test. A real write-back failure still alerts, because a production row
+        // never carries test_email.
+        if (jobResultMissing && testEmail) {
+            console.log(`[st-escalation-complete] TEST row ${callId} — backstop fired, suppressing the internal alert`);
+        }
+        if (jobResultMissing && !testEmail) {
             await emailNotificationService.sendInternalAlert({
                 callId,
                 agentId,
