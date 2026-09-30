@@ -1,6 +1,7 @@
 const { createJob, getAuthToken } = require('../controllers/serviceTradeController');
 const { findCustomerWithConfidence } = require('./customerMatchingService');
 const serviceTradeService = require('./serviceTradeService');
+const { resolveOnCallTechIds } = require('./onCallTechService');
 
 // ---------------------------------------------------------------------------------
 // Job description shape.
@@ -258,7 +259,8 @@ async function createJobFromCallContext(fields) {
         company_name,
         location_id,
         job_action,
-        job_summary
+        job_summary,
+        approved_by
     } = fields || {};
 
     // Same auth + confident-location resolution the pre-flight gate uses, so the
@@ -290,17 +292,29 @@ async function createJobFromCallContext(fields) {
     const isTest = /^\[TEST\]\s*/i.test(rawSummary);
     const issueSource = rawSummary.replace(/^\[TEST\]\s*/i, '').trim();
 
-    const tags = `${isTest ? '[TEST]' : ''}[AFTER HOURS]${isInactive ? '[INACTIVE LOCATION]' : ''}`;
+    // No [AFTER HOURS] tag: the job's own name is already "After Hours Service Call"
+    // (servicetrade_job_configs.custom_name), so the tag repeated on every single job and
+    // told a dispatcher nothing they could not already see.
+    //
+    // With it gone a normal job has no tags at all, so the description collapses to ONE
+    // line. Emitting an empty tag line would put a leading blank line on every job.
+    const tags = `${isTest ? '[TEST]' : ''}${isInactive ? '[INACTIVE LOCATION]' : ''}`;
     const action = resolveJobAction(job_action, issueSource);
     const summary = resolveJobSummary(job_summary, issueSource);
-    const description = `${tags}\n${action} ${summary}`;
+    const description = tags ? `${tags}\n${action} ${summary}` : `${action} ${summary}`;
+
+    // Who is on duty, as a ServiceTrade user id, so the appointment is created with a
+    // technician on it. Returns [] when the lookup is not configured or fails, which is
+    // exactly the old behaviour — an unassigned appointment, never a failed job.
+    const techIds = await resolveOnCallTechIds(approved_by);
 
     const job = await createJob(
         {
             locationId: selected.locationId,
             description,
             callerPhoneNumber: from_number || null,
-            call_id: call_id || null
+            call_id: call_id || null,
+            techIds
         },
         agent_id
     );

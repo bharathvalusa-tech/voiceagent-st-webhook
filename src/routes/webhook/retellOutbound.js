@@ -491,7 +491,12 @@ router.post('/retell-outbound', async (req, res) => {
                 // one-line summary from call_summary when either is missing, so an agent
                 // deploy without these variables still produces the fixed two-line shape.
                 job_action: custom.job_action ?? collected.job_action,
-                job_summary: custom.job_summary ?? collected.job_summary
+                job_summary: custom.job_summary ?? collected.job_summary,
+                // Who actually took THIS dispatch call. code.gs sets contact_name on every
+                // outbound call's dynamic variables: the on-call technician for steps 1-3,
+                // John McLean or Alex Kovachev for 4-6. When an escalation contact rather
+                // than the technician approves, the job is created unassigned.
+                approved_by: vars.contact_name || ''
             });
         } catch (createErr) {
             console.error(`[retell-outbound] job creation threw for call ${callId}: ${createErr.message || createErr}`);

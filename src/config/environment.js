@@ -61,6 +61,10 @@ const config = {
     // updated with is_job_created / job_number / outcome. Same value as the
     // Vercel ADAPTIVE_EXEC_URL that feeds the sheet.
     adaptiveSheetExecUrl: process.env.ADAPTIVE_SHEET_EXEC_URL || '',
+    // Who is on call right now, as a ServiceTrade user id, so the job's appointment is
+    // created with a technician already on it instead of unassigned. Unset = feature off
+    // and job creation is unchanged. See services/onCallTechService.js.
+    onCallAssignmentsUrl: process.env.ONCALL_ASSIGNMENTS_URL || '',
     // Recipients of internal error/alert emails (sendInternalAlert). Comma or
     // semicolon separated. Falls back to the built-in team list when unset.
     internalAlertRecipients: parseEmailList(process.env.INTERNAL_ALERT_RECIPIENTS, [

@@ -791,16 +791,17 @@ test('a FAILED send is not cached, so the Apps Script retry still gets through',
     } finally { server.close(); }
 });
 
-// ------------------------------------------- the two-line ServiceTrade job description
+// ------------------------------------------- the ServiceTrade job description
 //
-// Fixed shape, so a dispatcher scanning the ServiceTrade job list reads the same thing
-// every time:
+// Fixed shape so a dispatcher scanning the job list reads the same thing every time:
 //
-//   [TEST][AFTER HOURS][INACTIVE LOCATION]
+//   [TEST][INACTIVE LOCATION]
 //   Investigate no heat at unit 3, boiler locked out
 //
-// [AFTER HOURS] is unconditional — Adaptive creates jobs only on the after-hours
-// emergency path, so there is no office-hours branch to take.
+// There is NO [AFTER HOURS] tag — the job's own name is already "After Hours Service
+// Call" (servicetrade_job_configs.custom_name), so it repeated on every job and told a
+// dispatcher nothing. With it gone a normal job has no tags at all and collapses to ONE
+// line; an empty tag line would be a leading blank line on every job.
 
 const describeJob = async (fields, candidates = [candidate()]) => {
     const svc = matcherWith(candidates);
@@ -810,119 +811,304 @@ const describeJob = async (fields, candidates = [candidate()]) => {
     assert.strictEqual(result.status, 'created');
     return result.job.payload.description;
 };
+// The action line, wherever it ended up — line 2 when tagged, line 1 when not.
+const actionLine = (d) => d.split('\n').slice(-1)[0];
 
-test('the job description is exactly two lines: tags, then the action', async () => {
+test('a plain job is ONE line: no tags, just the action', async () => {
     const description = await describeJob({
         call_summary: 'Caller reports no heat.',
         job_action: 'Investigate',
         job_summary: 'no heat at unit 3'
     });
 
-    assert.deepStrictEqual(description.split('\n'), [
-        '[AFTER HOURS]',
-        'Investigate no heat at unit 3'
-    ]);
+    assert.deepStrictEqual(description.split('\n'), ['Investigate no heat at unit 3']);
+    assert.ok(!description.startsWith('\n'), 'never a leading blank line');
 });
 
-test('[TEST] moves from mid-prose onto the tag line', async () => {
-    // The Apps Script prefixes '[TEST] ' onto call_summary itself (code.gs), because Clara
-    // also speaks it aloud. It must land on line 1 here, not inside the sentence.
+test('[AFTER HOURS] is gone — it duplicated the job name', async () => {
+    const description = await describeJob(
+        { call_summary: '[TEST] no heat', job_summary: 'no heat at unit 3' },
+        [candidate({ locationStatus: 'inactive' })]
+    );
+    assert.ok(!/AFTER HOURS/i.test(description), description);
+});
+
+test('[TEST] moves from mid-prose onto its own tag line', async () => {
+    // The Apps Script prefixes '[TEST] ' onto call_summary because Clara speaks it aloud.
     const description = await describeJob({
         call_summary: '[TEST] Caller reports no heat.',
         job_action: 'Investigate',
         job_summary: 'no heat at unit 3'
     });
 
-    const [tags, action] = description.split('\n');
-    assert.strictEqual(tags, '[TEST][AFTER HOURS]');
-    assert.strictEqual(action, 'Investigate no heat at unit 3');
-    assert.ok(!action.includes('[TEST]'), '[TEST] must never appear on line 2');
+    assert.deepStrictEqual(description.split('\n'), ['[TEST]', 'Investigate no heat at unit 3']);
+    assert.ok(!actionLine(description).includes('[TEST]'), '[TEST] never on the action line');
 });
 
-test('[INACTIVE LOCATION] lands on the tag line, after the hours tag', async () => {
+test('[INACTIVE LOCATION] gets a tag line of its own', async () => {
     const description = await describeJob(
         { call_summary: 'no heat', job_action: 'Investigate', job_summary: 'no heat at unit 3' },
         [candidate({ locationStatus: 'inactive' })]
     );
-
-    assert.deepStrictEqual(description.split('\n'), [
-        '[AFTER HOURS][INACTIVE LOCATION]',
-        'Investigate no heat at unit 3'
-    ]);
+    assert.deepStrictEqual(description.split('\n'), ['[INACTIVE LOCATION]', 'Investigate no heat at unit 3']);
 });
 
-test('all three tags can appear together, in a fixed order', async () => {
+test('both tags together, in a fixed order', async () => {
     const description = await describeJob(
-        {
-            call_summary: '[TEST] Caller reports no heat.',
-            job_action: 'Troubleshoot',
-            job_summary: 'boiler lockout at unit 3'
-        },
+        { call_summary: '[TEST] no heat', job_action: 'Troubleshoot', job_summary: 'boiler lockout at unit 3' },
         [candidate({ locationStatus: 'inactive' })]
     );
-
-    assert.strictEqual(description.split('\n')[0], '[TEST][AFTER HOURS][INACTIVE LOCATION]');
-});
-
-test('an active, non-test job carries a bare [AFTER HOURS] line', async () => {
-    const description = await describeJob({ call_summary: 'no heat', job_summary: 'no heat at unit 3' });
-    assert.strictEqual(description.split('\n')[0], '[AFTER HOURS]');
+    assert.strictEqual(description.split('\n')[0], '[TEST][INACTIVE LOCATION]');
 });
 
 test('the caller name, phone and the old EMERGENCY banner are gone', async () => {
-    // The job is already on the caller's own location, and callerPhoneNumber is a field on
-    // the job record — repeating either in the description was noise.
     const description = await describeJob({
-        customer_name: 'Jane Doe',
-        from_number: '+14169012663',
-        call_summary: 'no heat',
-        job_summary: 'no heat at unit 3'
+        customer_name: 'Jane Doe', from_number: '+14169012663',
+        call_summary: 'no heat', job_summary: 'no heat at unit 3'
     });
-
     assert.ok(!description.includes('Jane Doe'));
     assert.ok(!description.includes('+14169012663'));
     assert.ok(!description.includes('EMERGENCY - TECH APPROVED'));
 });
 
 test('the verb falls back to Troubleshoot on a fault-code summary', async () => {
-    // No job_action from the dispatch agent — an older agent deploy, or an analyzer miss.
     for (const summary of ['Boiler is locked out', 'Unit showing error code E4', 'Alarm sounding']) {
         const description = await describeJob({ call_summary: summary });
-        assert.strictEqual(description.split('\n')[1].split(' ')[0], 'Troubleshoot', summary);
+        assert.strictEqual(actionLine(description).split(' ')[0], 'Troubleshoot', summary);
     }
 });
 
 test('the verb falls back to Investigate on everything else', async () => {
     for (const summary of ['No heat in the building', 'Water on the floor near the unit']) {
         const description = await describeJob({ call_summary: summary });
-        assert.strictEqual(description.split('\n')[1].split(' ')[0], 'Investigate', summary);
+        assert.strictEqual(actionLine(description).split(' ')[0], 'Investigate', summary);
     }
 });
 
-test('a supplied job_action wins over the derivation, and only the two values are accepted', async () => {
+test('a supplied job_action wins over the derivation; junk falls through to it', async () => {
     const forced = await describeJob({ call_summary: 'Boiler is locked out', job_action: 'Investigate' });
-    assert.strictEqual(forced.split('\n')[1].split(' ')[0], 'Investigate');
+    assert.strictEqual(actionLine(forced).split(' ')[0], 'Investigate');
 
-    // Anything else falls through to the derivation rather than reaching ServiceTrade.
     const junk = await describeJob({ call_summary: 'No heat in the building', job_action: 'Fix it' });
-    assert.strictEqual(junk.split('\n')[1].split(' ')[0], 'Investigate');
+    assert.strictEqual(actionLine(junk).split(' ')[0], 'Investigate');
 });
 
 test('the summary falls back to the first sentence, capped at 100 characters', async () => {
     const long = 'A'.repeat(140);
     const description = await describeJob({ call_summary: `${long}. Second sentence is dropped.` });
-    const line2 = description.split('\n')[1];
-
-    assert.ok(!line2.includes('Second sentence'), 'only the first sentence is used');
-    assert.ok(line2.length <= 'Investigate '.length + 100, `line 2 was ${line2.length} chars`);
+    const line = actionLine(description);
+    assert.ok(!line.includes('Second sentence'));
+    assert.ok(line.length <= 'Investigate '.length + 100, `line was ${line.length} chars`);
 });
 
-test('a job with no summary at all still produces two lines', async () => {
+test('a job with no summary at all still produces a valid line', async () => {
     const description = await describeJob({ call_summary: '' });
-    assert.deepStrictEqual(description.split('\n'), ['[AFTER HOURS]', 'Investigate emergency service request']);
+    assert.deepStrictEqual(description.split('\n'), ['Investigate emergency service request']);
 });
 
-test('trailing punctuation is stripped from the summary, not carried into the job', async () => {
+test('trailing punctuation is stripped from the summary', async () => {
     const description = await describeJob({ call_summary: 'no heat', job_summary: 'no heat at unit 3...' });
-    assert.strictEqual(description.split('\n')[1], 'Investigate no heat at unit 3');
+    assert.strictEqual(actionLine(description), 'Investigate no heat at unit 3');
+});
+
+// ------------------------------------------- the on-call technician on the appointment
+//
+// createJob forwards techIds to serviceTradeService.createAppointment. Nothing ever
+// passed any, so every appointment was created unassigned and a dispatcher had to attach
+// someone by hand. The rota is not static, so there is nothing to put in
+// servicetrade_job_configs — /api/assignments resolves it, and the id it returns is a
+// real ServiceTrade user id.
+
+const matcherWithTech = (techIds, candidates = [candidate()]) => loadWithMocks(
+    path.join(REPO, 'src/services/contextJobService'),
+    {
+        '../controllers/serviceTradeController': {
+            getAuthToken: async () => 'token',
+            createJob: async (payload) => ({ jobId: 99, jobNumber: '49942168', payload })
+        },
+        './customerMatchingService': { findCustomerWithConfidence: async () => candidates },
+        './onCallTechService': { resolveOnCallTechIds: async () => techIds }
+    }
+);
+
+const createWith = async (techIds) => {
+    const svc = matcherWithTech(techIds);
+    const result = await svc.createJobFromCallContext({
+        agent_id: OUTBOUND_AGENT, service_address: '9 Elmcrest Rd.', call_summary: 'no heat'
+    });
+    assert.strictEqual(result.status, 'created');
+    return result.job.payload;
+};
+
+test('the on-call technician is attached to the job', async () => {
+    const payload = await createWith([2173647235448386]);
+    assert.deepStrictEqual(payload.techIds, [2173647235448386]);
+});
+
+test('nobody on duty still creates the job, just unassigned', async () => {
+    // An unassigned job is a dispatcher's five-second fix. A job that failed to create
+    // because a lookup came back empty is a missed emergency.
+    const payload = await createWith([]);
+    assert.deepStrictEqual(payload.techIds, []);
+    assert.ok(payload.description, 'the job is still fully formed');
+});
+
+test('a lookup that throws never takes the job down with it', async () => {
+    const svc = loadWithMocks(
+        path.join(REPO, 'src/services/contextJobService'),
+        {
+            '../controllers/serviceTradeController': {
+                getAuthToken: async () => 'token',
+                createJob: async (payload) => ({ jobId: 99, jobNumber: 'X', payload })
+            },
+            './customerMatchingService': { findCustomerWithConfidence: async () => [candidate()] },
+            './onCallTechService': {
+                resolveOnCallTechIds: async () => { throw new Error('assignments endpoint down'); }
+            }
+        }
+    );
+    await assert.rejects(
+        () => svc.createJobFromCallContext({ agent_id: OUTBOUND_AGENT, service_address: 'x', call_summary: 'no heat' }),
+        /assignments endpoint down/,
+        'contextJobService does not swallow it — onCallTechService is what must never throw'
+    );
+});
+
+test('onCallTechService itself never throws, and is off until configured', async () => {
+    const withUrl = (url, fetchImpl) => {
+        const saved = global.fetch;
+        if (fetchImpl) global.fetch = fetchImpl;
+        const mod = loadWithMocks(path.join(REPO, 'src/services/onCallTechService'), {
+            '../config/environment': { onCallAssignmentsUrl: url }
+        });
+        return { mod, restore: () => { global.fetch = saved; } };
+    };
+
+    // unset -> feature off, no network call at all
+    let called = false;
+    let t = withUrl('', async () => { called = true; });
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), []);
+    assert.strictEqual(called, false, 'no request when the URL is unset');
+    t.restore();
+
+    const body = (o) => async () => ({ ok: true, status: 200, json: async () => o });
+
+    // skips the null padding the endpoint emits
+    t = withUrl('http://x', body({ assignments: [{ techs: [{ id: null }, { id: 2173647235448386, name: 'Shaquille Donalds' }] }] }));
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), [2173647235448386]);
+    t.restore();
+
+    // nobody on duty
+    t = withUrl('http://x', body({ assignments: [] }));
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), []);
+    t.restore();
+
+    // all-null techs
+    t = withUrl('http://x', body({ assignments: [{ techs: [{ id: null }, { id: null }] }] }));
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), []);
+    t.restore();
+
+    // non-200
+    t = withUrl('http://x', async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), []);
+    t.restore();
+
+    // network failure
+    t = withUrl('http://x', async () => { throw new Error('ECONNREFUSED'); });
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), []);
+    t.restore();
+
+    // malformed body
+    t = withUrl('http://x', async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); } }));
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), []);
+    t.restore();
+
+    // a garbage id is not passed to ServiceTrade
+    t = withUrl('http://x', body({ assignments: [{ techs: [{ id: 'not-a-number' }, { id: -1 }] }] }));
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), []);
+    t.restore();
+});
+
+// ------------------------------------------- who the job is assigned to
+//
+// Steps 1-3 of the ladder ring the on-call technician; steps 4-6 ring John McLean and
+// Alex Kovachev, who are escalation contacts, not the technician for this shift. When one
+// of them approves, the job is created with NO technician (owner's decision) rather than
+// assigning someone who never took the call.
+//
+// Matched by name against the rota's own answer, so adding an escalation contact needs no
+// change in the webhook.
+
+const oncallWith = (assignmentsBody) => {
+    const saved = global.fetch;
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => assignmentsBody });
+    const mod = loadWithMocks(path.join(REPO, 'src/services/onCallTechService'), {
+        '../config/environment': { onCallAssignmentsUrl: 'http://x' }
+    });
+    return { mod, restore: () => { global.fetch = saved; } };
+};
+const ROTA = { assignments: [{ techs: [{ id: 2173647235448386, name: 'Shaquille Donalds' }, { id: null, name: null }] }] };
+
+test('the on-call technician approving gets the job assigned to them', async () => {
+    const t = oncallWith(ROTA);
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds('Shaquille Donalds'), [2173647235448386]);
+    t.restore();
+});
+
+test('John McLean or Alex Kovachev approving leaves the job unassigned', async () => {
+    const t = oncallWith(ROTA);
+    for (const name of ['John McLean', 'Alex Kovachev']) {
+        assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(name), [], name);
+    }
+    t.restore();
+});
+
+test('the generic "On-call technician" label still counts as the technician', async () => {
+    // code.gs uses this when the row has no tech_name; it still means the person on duty.
+    const t = oncallWith(ROTA);
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds('On-call technician'), [2173647235448386]);
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds('  ON-CALL TECHNICIAN  '), [2173647235448386]);
+    t.restore();
+});
+
+test('name matching is case and whitespace insensitive', async () => {
+    const t = oncallWith(ROTA);
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds('  shaquille donalds '), [2173647235448386]);
+    t.restore();
+});
+
+test('no approver given assigns the on-call technician unconditionally', async () => {
+    // Backwards compatible: a caller that does not know who approved still gets the rota.
+    const t = oncallWith(ROTA);
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(), [2173647235448386]);
+    assert.deepStrictEqual(await t.mod.resolveOnCallTechIds(''), [2173647235448386]);
+    t.restore();
+});
+
+test('the approver reaches the job payload from the outbound call', async () => {
+    const svc = loadWithMocks(
+        path.join(REPO, 'src/services/contextJobService'),
+        {
+            '../controllers/serviceTradeController': {
+                getAuthToken: async () => 'token',
+                createJob: async (payload) => ({ jobId: 1, jobNumber: 'X', payload })
+            },
+            './customerMatchingService': { findCustomerWithConfidence: async () => [candidate()] },
+            './onCallTechService': {
+                resolveOnCallTechIds: async (name) => (name === 'John McLean' ? [] : [2173647235448386])
+            }
+        }
+    );
+    const tech = await svc.createJobFromCallContext({
+        agent_id: OUTBOUND_AGENT, service_address: 'x', call_summary: 'no heat',
+        approved_by: 'Shaquille Donalds'
+    });
+    assert.deepStrictEqual(tech.job.payload.techIds, [2173647235448386]);
+
+    const escalated = await svc.createJobFromCallContext({
+        agent_id: OUTBOUND_AGENT, service_address: 'x', call_summary: 'no heat',
+        approved_by: 'John McLean'
+    });
+    assert.deepStrictEqual(escalated.job.payload.techIds, [], 'escalation contact -> unassigned');
+    assert.ok(escalated.job.payload.description, 'the job is still created');
 });

@@ -832,3 +832,129 @@ test('isOwnEscalationCallId finds an id buried mid-list in V', skipIfNoAppsScrip
     // A prefix of a real id must not match — the split is on commas, not a substring test.
     assert.strictEqual(env.sandbox.isOwnEscalationCallId(env.sheet, 'call_out_'), false);
 });
+
+// ------------------------------------------- TEST_RUN_FULL_LADDER
+//
+// A test caller normally gets ONE call, because every step dials the same test handset.
+// The flag lifts that so the six-step path can be exercised end to end — column V filling
+// as a list, call1…call6 in the trail — without waiting for a real exhausted emergency.
+
+test('the flag is OFF by default, so a test caller still gets one call', skipIfNoAppsScript(), () => {
+    // Guards the committed default. A mirror that shipped with this on would ring the
+    // test handset six times on every test call.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_OVERRIDE_NUMBERS: ['+14169012663'] }
+    });
+    assert.strictEqual(env.sandbox.maxEscalationAttempts('+14169012663'), 1);
+});
+
+test('with the flag ON a test caller runs the full six-step ladder', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: { TEST_OVERRIDE_NUMBERS: ['+14169012663'], TEST_RUN_FULL_LADDER: true }
+    });
+    assert.strictEqual(env.sandbox.maxEscalationAttempts('+14169012663'), 6);
+});
+
+test('the flag never changes a real caller', skipIfNoAppsScript(), () => {
+    for (const flag of [true, false]) {
+        const env = loadAppsScript({
+            rows: [emergencyRow()],
+            fetchHandler: router('matched'),
+            config: { TEST_OVERRIDE_NUMBERS: ['+14169012663'], TEST_RUN_FULL_LADDER: flag }
+        });
+        assert.strictEqual(env.sandbox.maxEscalationAttempts('+14167770000'), 6, `flag=${flag}`);
+    }
+});
+
+test('with the flag ON every step still routes to the test phone, never a real contact', skipIfNoAppsScript(), () => {
+    // The whole safety of a full-ladder test rests on this: the cap and the dial override
+    // are independent, so lifting the cap must not start ringing John or Alex.
+    const env = loadAppsScript({
+        rows: [emergencyRow()],
+        fetchHandler: router('matched'),
+        config: {
+            TEST_OVERRIDE_NUMBERS: ['+14169012663'],
+            TEST_OUTBOUND_NUMBER: '+14155550000',
+            TEST_RUN_FULL_LADDER: true
+        }
+    });
+    for (let step = 1; step <= 6; step++) {
+        const t = env.sandbox.getCallTarget(step, 0, '+14165551234', 'Real Tech', '+14169012663');
+        assert.strictEqual(t.phone, '+14155550000', `step ${step} must ring the test phone`);
+    }
+    // and a real caller is untouched at the same steps
+    assert.strictEqual(
+        env.sandbox.getCallTarget(4, 0, '+14165551234', 'Real Tech', '+14167770000').name,
+        'John McLean'
+    );
+});
+
+// ------------------------------------------- the job_update / pending race
+//
+// handleJobUpdate can land BEFORE the tick that closes the row. The job_update is
+// non-terminal so it correctly does nothing; the terminal branch then waits for a result
+// that already arrived, and 15 minutes later the backstop reports a healthy write-back as
+// broken. That false alert pages three people.
+
+test('a job_update already seen stops the terminal branch waiting for it', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
+    assert.strictEqual(env.sandbox.hasJobUpdateFor('call_out_1'), false, 'nothing recorded yet');
+
+    env.sandbox.markJobUpdateSeen('call_out_1');
+    assert.strictEqual(env.sandbox.hasJobUpdateFor('call_out_1'), true,
+        'the terminal branch must see that this call already reported');
+
+    env.sandbox.clearJobUpdateSeen('call_out_1');
+    assert.strictEqual(env.sandbox.hasJobUpdateFor('call_out_1'), false,
+        'cleared once notified, so script properties do not grow without bound');
+});
+
+test('a call that never reported still looks outstanding, so a real failure alerts', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
+    env.sandbox.markJobUpdateSeen('call_out_1');
+    assert.strictEqual(env.sandbox.hasJobUpdateFor('call_out_2'), false);
+    assert.strictEqual(env.sandbox.hasJobUpdateFor(''), false, 'an empty id is never "seen"');
+});
+
+// ------------------------------------------- voicemail label
+//
+// classifyCall ruled these no_answer and kept escalating, but the trail said "answered"
+// directly under the webhook's "reached voicemail" line for the same call.
+
+test('a detected voicemail is labelled voicemail, not answered', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
+    const L = env.sandbox.disconnectionReasonLabel;
+    const C = env.sandbox.classifyCall;
+
+    const shapes = [
+        { call_status: 'ended', disconnection_reason: 'voicemail_reached' },
+        { call_status: 'ended', disconnection_reason: 'user_hangup', call_analysis: { in_voicemail: true } },
+        { call_status: 'ended', disconnection_reason: 'user_hangup', call_analysis: { custom_analysis_data: { reached_voicemail: 'true' } } },
+        { call_status: 'ended', disconnection_reason: 'agent_hangup', call_analysis: { custom_analysis_data: { reached_voicemail: true } } }
+    ];
+    for (const s of shapes) {
+        assert.strictEqual(L(s), 'voicemail', JSON.stringify(s));
+        assert.strictEqual(C(s), 'no_answer', 'and it must keep escalating');
+    }
+});
+
+test('a real human answering is still labelled answered', skipIfNoAppsScript(), () => {
+    const env = loadAppsScript({ rows: [emergencyRow()], fetchHandler: router('matched') });
+    const human = {
+        call_status: 'ended', disconnection_reason: 'user_hangup', duration_ms: 45000,
+        call_analysis: { custom_analysis_data: { reached_voicemail: 'false' } }
+    };
+    assert.strictEqual(env.sandbox.disconnectionReasonLabel(human), 'answered');
+    assert.strictEqual(env.sandbox.classifyCall(human), 'answered');
+
+    // a carrier no-answer outranks a stale voicemail flag
+    const noAnswer = {
+        call_status: 'ended', disconnection_reason: 'dial_no_answer',
+        call_analysis: { custom_analysis_data: { reached_voicemail: 'true' } }
+    };
+    assert.strictEqual(env.sandbox.disconnectionReasonLabel(noAnswer), 'no answer');
+});

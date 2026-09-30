@@ -30,7 +30,9 @@ function loadAppsScript({ rows = [], fetchHandler, properties = {}, config = {} 
     // supported, which is all the test knobs are.
     for (const [key, value] of Object.entries(config)) {
         const literal = JSON.stringify(value);
-        const pattern = new RegExp('(\\n\\s*' + key + ':\\s*)(\\[[^\\]]*\\]|\'[^\']*\'|"[^"]*")', 'm');
+        // Booleans too: CONFIG carries feature flags (TEST_RUN_FULL_LADDER), and a test
+        // that cannot flip one can only ever cover the default.
+        const pattern = new RegExp('(\\n\\s*' + key + ':\\s*)(\\[[^\\]]*\\]|\'[^\']*\'|"[^"]*"|true|false)', 'm');
         if (!pattern.test(source)) {
             throw new Error(`loadAppsScript: no CONFIG.${key} literal found to override`);
         }
