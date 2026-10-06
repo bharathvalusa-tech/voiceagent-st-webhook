@@ -6,17 +6,24 @@ const { resolveOnCallTechIds } = require('./onCallTechService');
 // ---------------------------------------------------------------------------------
 // Job description shape.
 //
-// The ServiceTrade job description is exactly two lines: flags on line 1, the action
-// verb and the one-line issue on line 2. Fixed rather than free prose, so a dispatcher
-// scanning the job list in ServiceTrade reads the same shape every time.
+// The ServiceTrade job description is a fixed shape rather than free prose, so a
+// dispatcher scanning the job list in ServiceTrade reads the same thing every time:
+// any flags on line 1, then the action verb and the one-line issue.
 //
-//   [TEST][AFTER HOURS][INACTIVE LOCATION]
-//   Investigate no heat at unit 3, boiler locked out
+//   [TEST][INACTIVE LOCATION]
+//   Investigate no heat at unit 3, boiler locked out.
 //
-// `[AFTER HOURS]` is unconditional: Adaptive creates jobs only on the after-hours
-// emergency path, so there is no office-hours branch to take. `[TEST]` and
-// `[INACTIVE LOCATION]` appear only when they apply. `[TEST]` is how test jobs are
-// found and deleted from the production ServiceTrade account, so it must survive.
+// Most jobs carry no flags at all, so the description collapses to the single line
+// `Investigate no heat at unit 3, boiler locked out.` — always a full sentence ending
+// in a period (`tidy` strips any punctuation the summary arrived with, so the period
+// is added exactly once here).
+//
+// `[AFTER HOURS]` was removed on 2026-09-30 — it appeared on every job and duplicated
+// the job's own name, "After Hours Service Call". Since 2026-10-05 after-hours is a
+// ServiceTrade TAG (`After_Hours`) attached to every job in serviceTradeController,
+// not a line of the description. `[TEST]` and `[INACTIVE LOCATION]` appear only when
+// they apply. `[TEST]` is how test jobs are found and deleted from the production
+// ServiceTrade account, so it must survive.
 // ---------------------------------------------------------------------------------
 
 // Fault signals that mean the technician is chasing a code the equipment already
@@ -301,7 +308,7 @@ async function createJobFromCallContext(fields) {
     const tags = `${isTest ? '[TEST]' : ''}${isInactive ? '[INACTIVE LOCATION]' : ''}`;
     const action = resolveJobAction(job_action, issueSource);
     const summary = resolveJobSummary(job_summary, issueSource);
-    const description = tags ? `${tags}\n${action} ${summary}` : `${action} ${summary}`;
+    const description = tags ? `${tags}\n${action} ${summary}.` : `${action} ${summary}.`;
 
     // Who is on duty, as a ServiceTrade user id, so the appointment is created with a
     // technician on it. Returns [] when the lookup is not configured or fails, which is

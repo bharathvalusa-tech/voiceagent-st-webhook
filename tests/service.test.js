@@ -796,12 +796,17 @@ test('a FAILED send is not cached, so the Apps Script retry still gets through',
 // Fixed shape so a dispatcher scanning the job list reads the same thing every time:
 //
 //   [TEST][INACTIVE LOCATION]
-//   Investigate no heat at unit 3, boiler locked out
+//   Investigate no heat at unit 3, boiler locked out.
 //
-// There is NO [AFTER HOURS] tag — the job's own name is already "After Hours Service
+// The action line is a sentence and ends in exactly one period — `tidy` strips whatever
+// punctuation the summary arrived with, so the period is never doubled.
+//
+// There is NO [AFTER HOURS] line — the job's own name is already "After Hours Service
 // Call" (servicetrade_job_configs.custom_name), so it repeated on every job and told a
-// dispatcher nothing. With it gone a normal job has no tags at all and collapses to ONE
-// line; an empty tag line would be a leading blank line on every job.
+// dispatcher nothing. After-hours is a ServiceTrade tag (`After_Hours`) attached by the
+// controller instead (tests/jobContact.test.js). With the line gone a normal job has no
+// flags at all and collapses to ONE line; an empty flag line would be a leading blank
+// line on every job.
 
 const describeJob = async (fields, candidates = [candidate()]) => {
     const svc = matcherWith(candidates);
@@ -821,8 +826,15 @@ test('a plain job is ONE line: no tags, just the action', async () => {
         job_summary: 'no heat at unit 3'
     });
 
-    assert.deepStrictEqual(description.split('\n'), ['Investigate no heat at unit 3']);
+    assert.deepStrictEqual(description.split('\n'), ['Investigate no heat at unit 3.']);
     assert.ok(!description.startsWith('\n'), 'never a leading blank line');
+});
+
+test('the action line ends in exactly one period, even when the summary brought its own', async () => {
+    for (const job_summary of ['no heat at unit 3', 'no heat at unit 3.', 'no heat at unit 3!', 'no heat at unit 3...']) {
+        const description = await describeJob({ call_summary: 'Caller reports no heat.', job_action: 'Investigate', job_summary });
+        assert.strictEqual(description, 'Investigate no heat at unit 3.', job_summary);
+    }
 });
 
 test('[AFTER HOURS] is gone — it duplicated the job name', async () => {
@@ -841,7 +853,7 @@ test('[TEST] moves from mid-prose onto its own tag line', async () => {
         job_summary: 'no heat at unit 3'
     });
 
-    assert.deepStrictEqual(description.split('\n'), ['[TEST]', 'Investigate no heat at unit 3']);
+    assert.deepStrictEqual(description.split('\n'), ['[TEST]', 'Investigate no heat at unit 3.']);
     assert.ok(!actionLine(description).includes('[TEST]'), '[TEST] never on the action line');
 });
 
@@ -850,7 +862,7 @@ test('[INACTIVE LOCATION] gets a tag line of its own', async () => {
         { call_summary: 'no heat', job_action: 'Investigate', job_summary: 'no heat at unit 3' },
         [candidate({ locationStatus: 'inactive' })]
     );
-    assert.deepStrictEqual(description.split('\n'), ['[INACTIVE LOCATION]', 'Investigate no heat at unit 3']);
+    assert.deepStrictEqual(description.split('\n'), ['[INACTIVE LOCATION]', 'Investigate no heat at unit 3.']);
 });
 
 test('both tags together, in a fixed order', async () => {
@@ -898,17 +910,18 @@ test('the summary falls back to the first sentence, capped at 100 characters', a
     const description = await describeJob({ call_summary: `${long}. Second sentence is dropped.` });
     const line = actionLine(description);
     assert.ok(!line.includes('Second sentence'));
-    assert.ok(line.length <= 'Investigate '.length + 100, `line was ${line.length} chars`);
+    assert.ok(line.length <= 'Investigate '.length + 100 + '.'.length, `line was ${line.length} chars`);
+    assert.ok(line.endsWith('.'), 'the capped fallback still ends in a period');
 });
 
 test('a job with no summary at all still produces a valid line', async () => {
     const description = await describeJob({ call_summary: '' });
-    assert.deepStrictEqual(description.split('\n'), ['Investigate emergency service request']);
+    assert.deepStrictEqual(description.split('\n'), ['Investigate emergency service request.']);
 });
 
 test('trailing punctuation is stripped from the summary', async () => {
     const description = await describeJob({ call_summary: 'no heat', job_summary: 'no heat at unit 3...' });
-    assert.strictEqual(actionLine(description), 'Investigate no heat at unit 3');
+    assert.strictEqual(actionLine(description), 'Investigate no heat at unit 3.');
 });
 
 // ------------------------------------------- the on-call technician on the appointment

@@ -3,6 +3,10 @@ const supabaseService = require('../services/supabaseService');
 const emailNotificationService = require('../services/emailNotificationService');
 const { normalizePhone } = require('../utils/phone');
 
+// Attached to every job Clara creates. ServiceTrade tag names allow letters, numbers,
+// hyphens and underscores only (32 chars max), so the bracketed form cannot be a tag.
+const JOB_TAG = 'After_Hours';
+
 /**
  * Helper function to convert Unix epoch to human-readable date/time
  */
@@ -620,6 +624,19 @@ const createJob = async (jobData, agentId) => {
 
         console.log('✅ Job created:', job.id);
 
+        // Every job Clara books is an after-hours job, so every job carries the tag. A
+        // tag is a ServiceTrade entity of its own, attached after the job exists; it is
+        // not a field on POST /job. Failure is logged and never fails the job — the job
+        // is the thing the technician already approved.
+        let tagged = false;
+        try {
+            await serviceTradeService.attachJobTag(supabaseAuthToken, job.id, JOB_TAG);
+            tagged = true;
+            console.log(`🏷️ Tag ${JOB_TAG} attached to job:`, job.id);
+        } catch (error) {
+            console.error(`⚠️ Failed to attach tag ${JOB_TAG} to job ${job.id}:`, error.message);
+        }
+
         let appointment = null;
         let serviceRequest = null;
         let appointmentErrorMessage = null;
@@ -704,6 +721,7 @@ const createJob = async (jobData, agentId) => {
             callId: call_id,
             serviceLineIds: resolvedServiceLineIds,
             serviceLineId: resolvedServiceLineId,
+            tagged,
             appointmentCreated: Boolean(appointment && appointment.id),
             serviceRequestCreated: Boolean(appointment && appointment.id && !serviceRequestErrorMessage),
             appointmentError: appointmentErrorMessage,

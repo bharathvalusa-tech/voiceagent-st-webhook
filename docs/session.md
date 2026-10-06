@@ -1327,3 +1327,39 @@ entry and produced `jm@adaptiveclimates.com,sd@adaptiveclimates.ca`.
   carries a live plaintext SendGrid key. The file is gitignored (`.gitignore:93`) and has never
   been committed — verified against the full history — so nothing is exposed today. But one
   `git add -f` would publish it. Rotating that key is worth doing regardless.
+
+## Session 2026-10-05 — `After_Hours` becomes a ServiceTrade tag, and the description ends in a period
+
+**Before:** no after-hours marker anywhere on the job (the `[AFTER HOURS]` description line was
+dropped on 2026-09-30 as a duplicate of the job name). **After:** every job created through
+`serviceTradeController.createJob` carries the ServiceTrade tag `After_Hours`, and the
+Adaptive description's action line ends in a period. **Why:** the owner wants after-hours
+visible as a tag, not as prose, and wants the description to read as a sentence.
+
+- `src/services/serviceTradeService.js` — new `attachJobTag(authToken, jobId, tagName)`:
+  `POST /tag` with `{ name, entityId, entityType: 3 }`. Entity type 3 is Job, from the
+  "Entity Types" table in ServiceTrade's OpenAPI document
+  (`https://api.servicetrade.com/openapi/openapi.json`).
+- `src/controllers/serviceTradeController.js` — `JOB_TAG = 'After_Hours'`, attached right
+  after `POST /job` and before the appointment, on every caller (`retell.js`,
+  `routes/serviceTrade/createJob.js`, `contextJobService.js`). Failure is logged, never
+  fatal; the result carries `tagged: true|false`.
+- `src/services/contextJobService.js` — `${action} ${summary}.`; `tidy` already strips
+  trailing punctuation, so the period is never doubled.
+
+**Verified live first, 2026-10-05.** Job **#51215600** (`2763462751059457`) created on
+"Adaptive Climates Office (365)" with no technician, then tagged. Read back:
+`"tags":["NO_COI","Not_On_Master_Client_List","TEST_JOB_CREATED_BY_CLARA_AI"]`. Two findings:
+
+- the bracketed form is not a legal tag name —
+  `400 {"messages":{"validation":{"name":{"format":"Not a valid tag name, tags must be 32 chars or fewer and include only letters, numbers, hyphens, and underscores"}}}}` —
+  which is why the tag is `After_Hours`;
+- re-attaching a tag the job already has answered **200**, not the documented 409.
+
+**Job #51215600 is a `[TEST]` job on a real location and should be deleted.** The tag
+`TEST_JOB_CREATED_BY_CLARA_AI` (`2763462731763265`) now exists in the account too.
+
+Not changed: the appointment. `POST /appointment` has no description field at all
+(`jobId, status, serviceRequestIds, techIds, windowStart, windowEnd, released`); the only
+text in the chain is the job description and the service-request description, and the
+controller feeds both from the same string.
