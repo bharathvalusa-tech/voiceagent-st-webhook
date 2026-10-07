@@ -572,6 +572,36 @@ class ServiceTradeService {
         }
     }
 
+    /**
+     * Attach a tag to a job, creating the tag if it does not exist yet.
+     *
+     * One call does both: `POST /tag` with `name` finds-or-creates the tag, and
+     * `entityId` + `entityType` attach it. `entityType` 3 is Job — the constant comes
+     * from the "Entity Types" table in ServiceTrade's OpenAPI document
+     * (AssetDefinition 1, Asset 2, Job 3, User 4, Company 5, Invoice 6).
+     *
+     * Tag names are letters, numbers, hyphens and underscores only, 32 chars max —
+     * `[AFTER HOURS]` is rejected with 400, `After_Hours` is not. Re-attaching a tag the
+     * job already carries answered 200 on the live API (2026-10-05), so a retry is safe.
+     */
+    async attachJobTag(authToken, jobId, tagName) {
+        const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;
+        const response = await fetch(`${this.baseUrl}/tag`, {
+            method: "POST",
+            headers: {
+                "Cookie": cookieValue,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ name: tagName, entityId: jobId, entityType: 3 })
+        });
+        const responseText = await response.text();
+        if (!response.ok) {
+            throw new Error(`ServiceTrade API error: ${response.status} ${response.statusText} - ${responseText}`);
+        }
+        const responseData = JSON.parse(responseText);
+        return responseData.data || responseData;
+    }
+
     async updateJob(authToken, jobId, jobData) {
         try {
             const cookieValue = `PHPSESSID=${authToken}; Path=/; Secure; HttpOnly;`;

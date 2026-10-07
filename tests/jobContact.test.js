@@ -253,3 +253,86 @@ test('an explicitly supplied primaryContactId is passed through untouched', asyn
 
     assert.strictEqual(created[0].primaryContactId, 12345);
 });
+
+// ------------------------------------------------------------------ the After_Hours tag
+//
+// Every job Clara books is after-hours, so every job carries the ServiceTrade tag
+// `After_Hours`. It replaces the `[AFTER HOURS]` line that was dropped from the description
+// on 2026-09-30. A tag is its own entity: `POST /tag` with name + entityId + entityType (3 =
+// Job) finds-or-creates it and attaches it, and it can only run once the job id exists.
+// Verified live 2026-10-05 on job #51215600 — and `[AFTER HOURS]` itself is rejected with
+// 400 (brackets and spaces are not allowed in a tag name).
+
+test('attachJobTag posts name + entityId + entityType 3 to /tag', async () => {
+    const svc = require(path.join(REPO, 'src/services/serviceTradeService'));
+    const requests = [];
+
+    const tag = await withFetch(
+        async (url, init) => {
+            requests.push({ url, body: JSON.parse(init.body) });
+            return jsonOk({ data: { id: 2763462731763265, name: 'After_Hours' } });
+        },
+        () => svc.attachJobTag('tok', 2763462751059457, 'After_Hours')
+    );
+
+    assert.strictEqual(requests.length, 1);
+    assert.ok(requests[0].url.endsWith('/tag'), requests[0].url);
+    assert.deepStrictEqual(requests[0].body, { name: 'After_Hours', entityId: 2763462751059457, entityType: 3 });
+    assert.strictEqual(tag.name, 'After_Hours');
+});
+
+const taggingController = ({ attachJobTag, events }) => loadWithMocks(
+    path.join(REPO, 'src/controllers/serviceTradeController'),
+    {
+        '../services/supabaseService': {
+            getServiceTradeToken: async () => ([{ agent_id: AGENT, auth_token: 'tok', Name: 'Adaptive' }]),
+            credentialsFingerprint: () => null,
+            recordSessionValid: async () => {},
+            markAuthFailure: async () => {},
+            getJobConfig: async () => ({ create_appointment: true })
+        },
+        '../services/emailNotificationService': { sendInternalAlert: async () => {} },
+        '../services/serviceTradeService': {
+            checkSession: async () => ({ valid: true, expired: false, status: 200, reason: null }),
+            getContacts: async () => null,
+            getLocationById: async () => ({ id: JOB_LOCATION, primaryContact: null }),
+            createJob: async () => { events.push('job'); return { id: 777, number: '49942168' }; },
+            attachJobTag: async (...args) => { events.push('tag'); return attachJobTag(...args); },
+            updateJob: async () => ({}),
+            createAppointment: async () => { events.push('appointment'); return { id: 888 }; },
+            createServiceRequest: async () => { events.push('serviceRequest'); return { id: 999 }; }
+        }
+    }
+);
+
+test('every created job gets the After_Hours tag, attached after the job exists', async () => {
+    const events = [];
+    const attached = [];
+    const controller = taggingController({
+        events,
+        attachJobTag: async (token, jobId, name) => { attached.push({ token, jobId, name }); return { name }; }
+    });
+
+    const result = await controller.createJob({ locationId: JOB_LOCATION, description: 'no hot water.' }, AGENT);
+
+    assert.deepStrictEqual(attached, [{ token: 'tok', jobId: 777, name: 'After_Hours' }]);
+    assert.strictEqual(events[0], 'job', 'the tag needs the job id, so the job is always first');
+    assert.strictEqual(events[1], 'tag');
+    assert.strictEqual(result.tagged, true);
+    assert.strictEqual(result.jobId, 777);
+});
+
+test('a tag failure is logged and never fails the job', async () => {
+    const events = [];
+    const controller = taggingController({
+        events,
+        attachJobTag: async () => { throw new Error('ServiceTrade API error: 403 Forbidden - not allowed to manage tags'); }
+    });
+
+    const result = await controller.createJob({ locationId: JOB_LOCATION, description: 'no hot water.' }, AGENT);
+
+    assert.strictEqual(result.jobId, 777);
+    assert.strictEqual(result.tagged, false);
+    assert.strictEqual(result.appointmentCreated, true, 'the appointment still follows the job');
+    assert.deepStrictEqual(events, ['job', 'tag', 'appointment', 'serviceRequest']);
+});
