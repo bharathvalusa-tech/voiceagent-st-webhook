@@ -3,6 +3,7 @@ const router = express.Router();
 const { sendSuccessResponse } = require('../../utils/responseHelper');
 const { getAuthToken } = require('../../controllers/serviceTradeController');
 const { matchAgainstRows } = require('../../services/addressMatchService');
+const locationPhoneIndex = require('../../services/locationPhoneIndex');
 const { normalizePhone } = require('../../utils/phone');
 
 /**
@@ -247,8 +248,32 @@ const baseVars = () => ({
     st_location_id: '',
     st_location_name: '',
     st_location_address: '',
-    st_location_options: ''
+    st_location_options: '',
+    // Step 1 hands down to the address ask rather than ending the call. Only an explicit
+    // 'true' moves the prompt on, so a tenant that never sets it is unaffected.
+    st_needs_address: 'false',
+    // The whole sentence to say, already shaped for one site or several, so the prompt
+    // never has to assemble it from parts.
+    st_company_question: ''
 });
+
+// A location-phone-index hit in the {street, city, state, postal_code} row shape the
+// contact search already produces, so one dedupe and one spoken-address helper serve both.
+// Same adapter as /st-inbound-lookup uses; see that route for the shape it reads.
+const indexHitToRow = (hit) => {
+    const a = hit.address || {};
+    return {
+        servicetrade_id: hit.locationId,
+        name: hit.locationName || '',
+        status: hit.locationStatus || 'active',
+        street: a.street || '',
+        city: a.city || '',
+        state: a.state || '',
+        postal_code: a.postalCode || '',
+        companyId: hit.companyId || null,
+        companyName: hit.companyName || ''
+    };
+};
 
 const withLocation = (vars, contact, location) => ({
     ...vars,
@@ -294,7 +319,31 @@ const resolveCustomer = async ({ agentId, rawTerm, spokenLocation, attempt }) =>
         }
 
         const authToken = await getAuthToken(agentId);
-        const parsed = normalizeContactSearch(await fetchContactSearch(authToken, term));
+
+        // TWO SEARCHES, FIRED TOGETHER.
+        //
+        // The contact search finds a person whose own mobile or desk line is on file.
+        // It cannot find a caller ringing from their site's main line, because
+        // `Location.phoneNumber` lives on the location and `/contact?search=` never sees
+        // it — that caller was previously invisible, not refused.
+        //
+        // In parallel, not in series: a cold index rebuild is one full GET /location pull
+        // and an emergency caller is on the line. Each source swallows its own failure,
+        // so one being down degrades the answer rather than ending the call.
+        // THE CONTACT SEARCH IS NOT ALLOWED TO FAIL QUIETLY. A ServiceTrade outage is not
+        // a new customer: if the primary source is down we know nothing, so its error
+        // throws to the outer catch and becomes `lookup_error`. The index is
+        // supplementary — losing it costs us main-line callers and nothing else — so it
+        // swallows its own failure and returns no hits.
+        const [parsed, indexHits] = await Promise.all([
+            fetchContactSearch(authToken, term).then(normalizeContactSearch),
+            locationPhoneIndex
+                .lookupAllByPhone(authToken, term, authToken, agentId)
+                .catch((error) => {
+                    console.error(`[st-verify-customer] location index unavailable: ${error.message || error}`);
+                    return [];
+                })
+        ]);
 
         // The verdict. companyIsCustomer === true is the whole gate — not `vendor`, not
         // `managingAccountId`, and no re-comparison of the caller's digits against
@@ -303,17 +352,31 @@ const resolveCustomer = async ({ agentId, rawTerm, spokenLocation, attempt }) =>
         // would reject the very record ServiceTrade just returned for that search.
         const customers = parsed.contacts.filter((c) => c.companyIsCustomer === true);
 
+        // AN INDEX HIT ALONE NEVER VERIFIES ANYONE.
+        //
+        // The index is built from GET /location, which is NOT filtered to customers —
+        // measured on Braconier's own mirror, 162 of 300 sampled companies carry
+        // `customer: false`. So a phone number can reach a location whose company we do
+        // not service, and treating that as verification would walk straight through the
+        // one gate this route exists to enforce.
+        //
+        // Index hits therefore only ADD sites to a caller the contact search already
+        // proved is a customer. A caller found only by their site's main line falls to
+        // the address ask, where the same site is matched from the mirror anyway.
         if (customers.length === 0) {
             const found = parsed.contacts.length > 0;
             return {
                 vars: {
                     ...baseVars(),
                     st_customer_reason: found ? REASONS.companyNotCustomer : REASONS.noContactMatch,
-                    st_retry_allowed: attempt === 2 ? 'false' : 'true'
+                    st_retry_allowed: attempt === 2 ? 'false' : 'true',
+                    // STEP 1 NEVER ENDS A CALL. The number told us nothing, which is not a
+                    // judgement about the caller — people ring from mobiles and site
+                    // phones. The address does the finding from here.
+                    st_needs_address: 'true'
                 },
-                message: attempt === 2
-                    ? 'No customer account matched. Tell the caller service is only available during normal business hours and end the call.'
-                    : 'No customer account matched. Ask once for the phone number on their account, then call this again with that number as search and attempt 2.',
+                message: 'No account matched this number. Ask which location the work is at, '
+                    + 'then call st_match_address with that address.',
                 log: { shape: parsed.shape, totalRecords: parsed.totalRecords, contactsFound: parsed.contacts.length }
             };
         }
@@ -333,6 +396,24 @@ const resolveCustomer = async ({ agentId, rawTerm, spokenLocation, attempt }) =>
             });
         });
 
+        // Sites the caller's number reaches directly, by the LOCATION's own line. Deduped
+        // against the contact's, because a facilities manager listed on the site they also
+        // ring from is one site, not two. The index carries no contact, so a hit that the
+        // contact search did not also produce has an empty identity — which is correct:
+        // we know the building, not the person.
+        // Only sites belonging to a company the contact search already verified. Anything
+        // else would be a site we have not established is a customer's — see the note
+        // above the customers.length check.
+        const verifiedCompanyIds = new Set(customers.map((c) => String(c.companyId || '')));
+        indexHits.forEach((hit) => {
+            const key = String(hit.locationId);
+            if (seen.has(key)) return;
+            const loc = indexHitToRow(hit);
+            if (!verifiedCompanyIds.has(String(loc.companyId || ''))) return;
+            seen.add(key);
+            locations.push({ contact: customers[0], loc });
+        });
+
         const identity = (c) => ({
             st_contact_id: String(c.contactId || ''),
             st_contact_name: c.contactName || '',
@@ -342,23 +423,45 @@ const resolveCustomer = async ({ agentId, rawTerm, spokenLocation, attempt }) =>
 
         if (locations.length === 0) {
             return {
-                vars: { ...baseVars(), ...identity(customers[0]), st_customer_reason: REASONS.locationUnresolved },
-                message: 'The account has no service location on file. Tell the caller service is only available during normal business hours and end the call.',
+                vars: {
+                    ...baseVars(),
+                    ...identity(customers[0]),
+                    st_customer_reason: REASONS.locationUnresolved,
+                    // We know the company and it has no site on file. Nothing to confirm,
+                    // so go straight to the address. Ending the call here told a real
+                    // customer we do not service them.
+                    st_needs_address: 'true'
+                },
+                message: 'The account has no service location on file. Ask which location the '
+                    + 'work is at, then call st_match_address with that address.',
                 log: { customers: customers.length }
             };
         }
 
         // Exactly one — nothing to disambiguate. The caller still confirms it aloud.
+        //
+        // The question names the ADDRESS and the COMPANY together. The address alone left
+        // the caller agreeing to a street they half-heard; the company is the half they
+        // can answer without thinking.
         if (locations.length === 1 && !spokenLocation) {
             const { contact, loc } = locations[0];
+            const vars = withLocation(baseVars(), contact, loc);
+            const question = vars.st_company_name
+                ? `We have this location — ${vars.st_location_address}, belonging to `
+                  + `${vars.st_company_name}. Is that where you need the work done?`
+                : `We have this location — ${vars.st_location_address}. Is that where you `
+                  + 'need the work done?';
             return {
                 vars: {
-                    ...withLocation(baseVars(), contact, loc),
+                    ...vars,
                     st_customer_verified: 'true',
                     st_customer_reason: REASONS.needsConfirmation,
-                    st_needs_confirmation: 'true'
+                    st_needs_confirmation: 'true',
+                    st_company_question: question
                 },
-                message: 'Confirm the caller is this contact at this company, then confirm the work is at this location.',
+                message: `Say exactly: "${question}" A yes ends the lookup. A no means say you `
+                    + 'cannot find their location on file, then ask which location the work is '
+                    + 'at and call st_match_address with that address.',
                 log: { shape: parsed.shape }
             };
         }
@@ -372,9 +475,13 @@ const resolveCustomer = async ({ agentId, rawTerm, spokenLocation, attempt }) =>
                     st_customer_verified: 'true',
                     st_customer_reason: REASONS.needsLocation,
                     st_needs_location: 'true',
-                    st_location_options: locations.map(({ loc }) => spokenAddress(loc)).join(' | ')
+                    st_location_options: locations.map(({ loc }) => spokenAddress(loc)).join(' | '),
+                    st_company_question: 'There are multiple matches against your number. '
+                        + 'Which location are you speaking from?'
                 },
-                message: 'Ask one open question about which location this is for, then call this again with spoken_location set.',
+                message: 'Say exactly: "There are multiple matches against your number. Which '
+                    + 'location are you speaking from?" Then call this again with spoken_location '
+                    + 'set to exactly what they said.',
                 log: { locationCount: locations.length }
             };
         }
@@ -394,9 +501,14 @@ const resolveCustomer = async ({ agentId, rawTerm, spokenLocation, attempt }) =>
                 vars: {
                     ...baseVars(),
                     ...identity(locations[0].contact),
-                    st_customer_reason: REASONS.locationUnresolved
+                    st_customer_reason: REASONS.locationUnresolved,
+                    // The site they named is not one of theirs. That is a location problem,
+                    // not a verdict on the caller, so the address ask gets its turn.
+                    st_needs_address: 'true'
                 },
-                message: 'The location could not be identified. Do not ask again. Tell the caller service is only available during normal business hours and end the call.',
+                message: 'That location could not be identified. Say you cannot find their '
+                    + 'location on file, then ask which location the work is at and call '
+                    + 'st_match_address with that address.',
                 log: { spokenLocation, matchReason: match.reason, score: match.score ?? null }
             };
         }

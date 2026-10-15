@@ -206,16 +206,29 @@ class SupabaseService {
      * Adaptive account, which the flat columns alone would lose.
      */
     async getLocationsForAgent(agentId) {
-        const { data, error } = await supabase
-            .from('servicetrade_locations')
-            .select('servicetrade_id,name,phone_number,street,city,state,postal_code,status,raw_response')
-            .eq('agent_id', agentId);
+        // PAGED, BECAUSE POSTGREST CAPS A SELECT AT 1000 ROWS.
+        //
+        // Without this the caller's address was scored against the first thousand sites
+        // and no others. Adaptive has 405, so it never showed; Braconier has 4,843, so
+        // 79% of the account was invisible and a real customer at site 1,001 came back
+        // as no match. Found against live data, not in a test.
+        const PAGE = 1000;
+        const rows = [];
 
-        if (error) {
-            throw new Error(`Supabase error: ${error.message}`);
+        for (let from = 0; ; from += PAGE) {
+            const { data, error } = await supabase
+                .from('servicetrade_locations')
+                .select('servicetrade_id,name,phone_number,street,city,state,postal_code,status,raw_response')
+                .eq('agent_id', agentId)
+                .range(from, from + PAGE - 1);
+
+            if (error) {
+                throw new Error(`Supabase error: ${error.message}`);
+            }
+
+            rows.push(...(data || []));
+            if (!data || data.length < PAGE) return rows;
         }
-
-        return data || [];
     }
 
     async getJobConfig(agentId) {

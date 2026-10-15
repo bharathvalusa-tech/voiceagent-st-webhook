@@ -224,25 +224,74 @@ test('a decisive spoken location resolves it', async () => {
     assert.equal(r.data.st_location_id, '2000000000000001');
 });
 
-test('a vague spoken location ends the call — one attempt, no re-ask', async () => {
+test('a vague spoken location hands down to the address ask, it does not end the call', async () => {
+    // WAS: this ended the call. A site that cannot be identified is a location problem,
+    // not a verdict on the caller, and refusing them here told real customers we do not
+    // service them.
     loadRoute();
     stubFetch(twoLocations());
     const r = await invoke({ query: QUERY, body: { attempt: 1, spoken_location: 'the other one' } });
 
-    assert.equal(r.data.st_customer_verified, 'false');
     assert.equal(r.data.st_customer_reason, 'location_unresolved');
-    assert.equal(r.data.st_retry_allowed, 'false', 'a failed location match never earns another try');
-    assert.equal(r.data.st_location_id, '');
+    assert.equal(r.data.st_needs_address, 'true', 'the address ask gets its turn');
+    assert.equal(r.data.st_location_id, '', 'no site is attached on a miss');
+    assert.doesNotMatch(r.message, /end the call/i, 'step 1 never ends a call');
+});
+
+test('a number on no account hands down to the address ask', async () => {
+    loadRoute();
+    stubFetch({ data: { contacts: [] } });
+    const r = await invoke({ query: QUERY, body: { attempt: 1 } });
+
+    assert.equal(r.data.st_customer_verified, 'false');
+    assert.equal(r.data.st_needs_address, 'true');
+    assert.doesNotMatch(r.message, /end the call/i);
 });
 
 test('every phone format reduces to the same ten-digit search term', async () => {
+    // The route now fires two searches at once — the contact search and the location
+    // phone index — so assert on the contact call itself rather than on how many calls
+    // there were. The index call is a GET /location and carries no search term.
     for (const input of ['+13038758807', '3038758807', '(303) 875-8807', '303-875-8807 ext 450']) {
         loadRoute();
         const calls = stubFetch(sideloaded());
         await invoke({ query: { ...QUERY, from_number: input }, body: { attempt: 1 } });
-        assert.equal(calls.length, 1);
-        assert.match(calls[0], /[?&]search=3038758807(&|$)/, `${input} did not reduce to ten digits`);
+        const contactCalls = calls.filter((url) => url.includes('/contact?'));
+        assert.equal(contactCalls.length, 1, `${input} should search contacts exactly once`);
+        assert.match(contactCalls[0], /[?&]search=3038758807(&|$)/, `${input} did not reduce to ten digits`);
     }
+});
+
+test('the contact search and the location index are fired together, not in series', async () => {
+    // A caller ringing from their site's own main line is invisible to /contact?search=,
+    // because Location.phoneNumber lives on the location. The index is the only way to
+    // see them — and a cold rebuild is a full GET /location, so it cannot run second.
+    //
+    // The index caches for 12 hours per auth token, so an earlier test in this file
+    // leaves it warm and no rebuild is attempted. Clear it, or this asserts on ordering.
+    require(path.join(REPO, 'src/services/locationPhoneIndex')).invalidate();
+
+    loadRoute();
+    const calls = stubFetch(sideloaded());
+    await invoke({ query: QUERY, body: { attempt: 1 } });
+
+    assert.ok(calls.some((url) => url.includes('/contact?')), 'contact search must run');
+    assert.ok(calls.some((url) => url.includes('/location')), 'location index must run');
+});
+
+test('a site found only by its main line does NOT verify the caller', async () => {
+    // THE GATE. The index is built from GET /location, which is not filtered to
+    // customers — 162 of 300 sampled Braconier companies carry customer: false. So an
+    // index hit alone must never verify anyone; it only adds sites to a caller the
+    // contact search already proved is a customer.
+    require(path.join(REPO, 'src/services/locationPhoneIndex')).invalidate();
+
+    loadRoute();
+    stubFetch({ data: { contacts: [] } });
+    const r = await invoke({ query: QUERY, body: { attempt: 1 } });
+
+    assert.equal(r.data.st_customer_verified, 'false', 'no contact match means no verification');
+    assert.equal(r.data.st_needs_address, 'true', 'and the address ask gets its turn');
 });
 
 test('"+1" is a 200 asking for a number, not the 400 that broke the live call', async () => {
