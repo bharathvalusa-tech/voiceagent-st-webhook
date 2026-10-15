@@ -110,7 +110,8 @@ const config = {
     //
     // Keep in step with the Edge Function's own LOCATION_SYNC_AGENT_IDS secret.
     locationSyncAgentIds: parseIdList(process.env.LOCATION_SYNC_AGENT_IDS, [
-        'agent_efbe503faedf1bf516f961979f'
+        'agent_efbe503faedf1bf516f961979f',  // Adaptive Climate
+        'agent_41010d0d8c1f46cf1d9dfcddbf'   // Braconier
     ]),
     matchingThresholds: {
         confidence: parseNumber(process.env.MATCH_CONFIDENCE_THRESHOLD, 80),

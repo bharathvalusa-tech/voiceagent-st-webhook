@@ -15,6 +15,15 @@
 //   supabase functions deploy sync-locations
 //   supabase secrets set LOCATION_SYNC_AGENT_IDS="agent_efbe503faedf1bf516f961979f"
 //
+// Adding a tenant that has never been mirrored needs its company_id declared, because
+// deriveTenant normally reads that off rows it does not have yet:
+//
+//   supabase secrets set LOCATION_SYNC_AGENT_IDS=\
+//     "agent_efbe503faedf1bf516f961979f,agent_41010d0d8c1f46cf1d9dfcddbf:<company_id>"
+//
+// See db/2026-10-14-braconier-location-mirror.sql for picking that number and for the
+// queries that verify the seed.
+//
 // Run by hand:
 //   curl -X POST https://<ref>.supabase.co/functions/v1/sync-locations \
 //        -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
@@ -44,19 +53,52 @@ type Tenant = {
   stAgentId: string;
 };
 
-function parseAgentIds(raw: string | undefined): string[] {
+/**
+ * One configured tenant: the agent id, and optionally the `company_id` to seed it with.
+ *
+ * `LOCATION_SYNC_AGENT_IDS` entries take two shapes, separated by commas or semicolons:
+ *
+ *   agent_efbe503faedf1bf516f961979f                 derive company_id from existing rows
+ *   agent_41010d0d8c1f46cf1d9dfcddbf:6               use 6, and seed if there are no rows
+ *
+ * The suffix exists because `company_id` is NOT NULL and deriveTenant reads it off rows
+ * that a brand-new tenant does not have yet. Declaring it is the only way in. An agent
+ * that already has rows ignores the suffix, so adding one can never re-tag a live mirror.
+ */
+type ConfiguredAgent = { agentId: string; seedCompanyId: number | null };
+
+function parseAgentIds(raw: string | undefined): ConfiguredAgent[] {
   if (!raw) return [];
-  return raw.split(/[;,]/).map((entry) => entry.trim()).filter(Boolean);
+  return raw
+    .split(/[;,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [agentId, companyId] = entry.split(':').map((part) => part.trim());
+      const parsed = companyId === undefined ? NaN : Number(companyId);
+      return {
+        agentId,
+        seedCompanyId: Number.isFinite(parsed) ? parsed : null
+      };
+    })
+    .filter((entry) => Boolean(entry.agentId));
 }
 
 /**
  * Everything the sync needs for one agent, read out of the data.
  *
- * Returns null when the agent has no mirrored rows: `company_id` is NOT NULL and there
- * is nothing to infer it from, so a brand-new tenant needs its first rows seeded by
- * hand rather than guessed at here.
+ * Prefers the stored `company_id` whenever rows exist, so a configured value can never
+ * silently re-tag a mirror that is already live. Falls back to the configured value only
+ * for a tenant with no rows at all.
+ *
+ * Returns null when there are no rows AND nothing was configured: `company_id` is NOT
+ * NULL and there is nothing to infer it from.
  */
-async function deriveTenant(db: SupabaseClient, agentId: string): Promise<Tenant | null> {
+async function deriveTenant(
+  db: SupabaseClient,
+  agentId: string,
+  seedCompanyId: number | null
+): Promise<Tenant | null> {
   const { data, error } = await db
     .from('servicetrade_locations')
     .select('company_id')
@@ -64,13 +106,24 @@ async function deriveTenant(db: SupabaseClient, agentId: string): Promise<Tenant
     .limit(1);
 
   if (error) throw new Error(`company_id lookup failed for ${agentId}: ${error.message}`);
-  if (!data || data.length === 0 || data[0].company_id === null) {
-    console.error(`[sync-locations] ${agentId}: no mirrored rows, so no company_id to derive — skipping`);
+
+  const stored = data && data.length > 0 ? data[0].company_id : null;
+  const companyId = stored !== null && stored !== undefined ? Number(stored) : seedCompanyId;
+
+  if (companyId === null || !Number.isFinite(companyId)) {
+    console.error(
+      `[sync-locations] ${agentId}: no mirrored rows and no company_id configured — skipping. ` +
+      `Add it as "${agentId}:<company_id>" in LOCATION_SYNC_AGENT_IDS to seed this tenant.`
+    );
     return null;
   }
 
+  if (stored === null || stored === undefined) {
+    console.log(`[sync-locations] ${agentId}: seeding a new tenant with company_id ${companyId}`);
+  }
+
   const stAgentId = await resolveSessionAgent(db, agentId);
-  return { agentId, companyId: Number(data[0].company_id), stAgentId };
+  return { agentId, companyId, stAgentId };
 }
 
 /**
@@ -442,8 +495,8 @@ Deno.serve(async (req) => {
     { auth: { persistSession: false } }
   );
 
-  const agentIds = parseAgentIds(Deno.env.get('LOCATION_SYNC_AGENT_IDS'));
-  if (agentIds.length === 0) {
+  const configured = parseAgentIds(Deno.env.get('LOCATION_SYNC_AGENT_IDS'));
+  if (configured.length === 0) {
     return Response.json(
       { success: false, message: 'LOCATION_SYNC_AGENT_IDS is unset' },
       { status: 500 }
@@ -461,11 +514,14 @@ Deno.serve(async (req) => {
 
   // Sequential on purpose: two tenants must not refresh ServiceTrade sessions
   // concurrently, and there are single digits of them.
-  for (const agentId of agentIds) {
+  for (const { agentId, seedCompanyId } of configured) {
     try {
-      const tenant = await deriveTenant(db, agentId);
+      const tenant = await deriveTenant(db, agentId, seedCompanyId);
       if (!tenant) {
-        failures.push({ agent_id: agentId, error: 'no mirrored rows — company_id cannot be derived' });
+        failures.push({
+          agent_id: agentId,
+          error: 'no mirrored rows and no company_id configured — add "<agent_id>:<company_id>" to LOCATION_SYNC_AGENT_IDS'
+        });
         continue;
       }
       results.push(await syncTenant(db, tenant, full));

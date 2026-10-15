@@ -72,7 +72,17 @@ const buildIndex = (locations) => {
                 locationName: location.name || '',
                 locationStatus: location.status || null,
                 address: location.address || null,
-                matchedAddress: formatAddress(location.address)
+                matchedAddress: formatAddress(location.address),
+                // The caller is asked "we have this location, belonging to <company>" —
+                // so a hit that cannot name its company cannot answer the question. The
+                // GET /location payload nests it, and the mirror keeps it in
+                // raw_response, so both index sources can supply it.
+                companyId: location.company && location.company.id !== undefined
+                    ? String(location.company.id)
+                    : '',
+                companyName: location.company && location.company.name
+                    ? String(location.company.name)
+                    : ''
             });
         }
     }
@@ -129,6 +139,7 @@ async function buildIndexFromMirror(stAgentId) {
             status: row.status || raw.status || null,
             phoneNumber: row.phone_number || raw.phoneNumber || '',
             primaryContact: raw.primaryContact || null,
+            company: raw.company || null,
             address: raw.address || {
                 street: row.street || '',
                 city: row.city || '',
