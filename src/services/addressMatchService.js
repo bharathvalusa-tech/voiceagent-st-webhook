@@ -40,6 +40,15 @@ const DECISIVE_MARGIN = 0.08;
 // memory, not a CRM's shape" (SiteResolutionService.java, MAX_OFFERED).
 const MAX_OFFERED = 4;
 
+// Lower-case, alphanumerics only — so spacing, punctuation and casing cannot decide a
+// match. The mirrored site names are stored this way already (`DENVERPUBLICSCHOOLS`), so
+// squashing is what makes a spoken name comparable to a stored one at all.
+const squash = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// Below this a prefix test stops identifying and starts enumerating. Same floor the
+// company search uses, for the same reason.
+const MIN_NAME_CHARS = 4;
+
 // A house number that disagrees is disqualifying, however well the street scores.
 // Two different numbers on the same street are two different buildings.
 //
@@ -86,9 +95,43 @@ const rowAddress = (row) => [row.street, row.city, row.state, row.postal_code]
     .filter(Boolean)
     .join(', ');
 
+/**
+ * How well the caller's words match this site's NAME.
+ *
+ * SQUASH AND PREFIX, NOT FUZZY SIMILARITY. Measured against the 4,845 mirrored Braconier
+ * sites: 3,939 of the names are ALL CAPS with no spaces and truncated at 20 characters —
+ * `STANLEYBRITISHPRIMAR`, `DENVERPUBLICSCHOOLS`. Squashing both sides to alphanumerics and
+ * testing a prefix in either direction absorbs the truncation for free, and is far tighter
+ * than a fuzzy score:
+ *
+ *   "Ashley Elementary School"  squash+prefix -> 1 site
+ *                               fuzzy >= 0.6  -> 21 sites, every other "… Elementary School"
+ *
+ * Matrix reached the same conclusion for the same reason — a site label is spoken loosely
+ * far more often than a legal company name is.
+ *
+ * Returns 0 when either side is too short to identify anything; below the floor a prefix
+ * test enumerates the account rather than matching within it.
+ */
+const nameScore = (spoken, row) => {
+    const said = squash(spoken);
+    const stored = squash(row && row.name);
+    if (said.length < MIN_NAME_CHARS || stored.length < MIN_NAME_CHARS) return 0;
+    if (said === stored) return 1;
+    // Either direction: the caller may say more than the stored name holds (it is cut at
+    // 20 characters), or less than it ("Ashley Elementary" for "Ashley Elementary School").
+    if (said.startsWith(stored) || stored.startsWith(said)) return 0.96;
+    return 0;
+};
+
 const scoreRow = (spoken, row) => {
     const candidate = rowAddress(row);
-    if (!candidate) return { score: 0, candidate };
+
+    // The NAME path runs first and independently of the address, because a caller naming a
+    // building gives no street at all — `rowAddress` may even be empty for such a row.
+    const byName = nameScore(spoken, row);
+
+    if (!candidate) return { score: byName, candidate, matchedOn: byName ? 'name' : null };
 
     let score = addressSimilarity(spoken, candidate);
 
@@ -100,13 +143,22 @@ const scoreRow = (spoken, row) => {
 
     // Disqualify a different house number outright rather than letting a strong street
     // match carry it.
+    //
+    // ONLY WHEN THE ADDRESS IS WHAT MATCHED. A caller who says "the Abraham Lincoln High
+    // School one" states no house number, and a stored name like `11900ECORNELL` carries a
+    // number that is nothing to do with what they said. Letting this rule fire on a name
+    // match would reject every building anyone ever names.
     const spokenNumber = houseNumberOf(spoken);
     const candidateNumber = houseNumberOf(candidate);
     if (spokenNumber && candidateNumber && spokenNumber !== candidateNumber) {
-        return { score: 0, candidate, rejected: 'house_number_mismatch' };
+        return byName > 0
+            ? { score: byName, candidate, matchedOn: 'name' }
+            : { score: 0, candidate, rejected: 'house_number_mismatch' };
     }
 
-    return { score, candidate };
+    return byName > score
+        ? { score: byName, candidate, matchedOn: 'name' }
+        : { score, candidate, matchedOn: 'address' };
 };
 
 /**
@@ -169,10 +221,16 @@ function matchAgainstRows(spoken, rows) {
             // differently depending on which branch produced it.
             score: Number(best.score.toFixed(3)),
             runnerUp: Number(runnerUp.score.toFixed(3)),
-            // Capped at MAX_OFFERED because a caller cannot hold a longer list, and
-            // because an uncapped set is a disclosure. The route never speaks these —
-            // it reports counts only. They exist so the COMPANY can narrow them.
-            candidates: scored.slice(0, MAX_OFFERED).map((entry) => ({
+            // 🔴 NOT CAPPED. MAX_OFFERED is a limit on what is READ ALOUD, and nothing
+            // reads these — the route returns counts only. Capping them here truncated the
+            // set the COMPANY question narrows, so a caller whose site ranked fifth could
+            // name their company correctly and still be refused. Measured: 1801 California
+            // Street has more than four sites, and "Guard and Grace" — a real tenant the
+            // live system matched — fell outside the first four.
+            //
+            // Matrix has the same scar: truncating an authority set to a presentation
+            // limit refuses a site the caller was legitimately offered.
+            candidates: scored.map((entry) => ({
                 locationId: entry.row.servicetrade_id,
                 locationName: entry.row.name || '',
                 address: entry.candidate,
@@ -229,6 +287,15 @@ const COMPANY_MATCH_THRESHOLD = 0.6;
  * @param {Array}  candidates  the `candidates` array from an `ambiguous` result
  * @param {string} statedCompany  what the caller called their company
  */
+// True when every candidate is the same building recorded more than once — same company,
+// same address. Different ids alone do not make two sites.
+const allOneSite = (candidates) => {
+    if (candidates.length < 2) return true;
+    const key = (c) => `${normalizeText(c.companyName)}|${normalizeText(c.address)}`;
+    const first = key(candidates[0]);
+    return candidates.every((c) => key(c) === first);
+};
+
 function narrowByCompany(candidates, statedCompany) {
     const stated = String(statedCompany || '').trim();
     if (!Array.isArray(candidates) || candidates.length === 0) {
@@ -244,9 +311,20 @@ function narrowByCompany(candidates, statedCompany) {
     if (exact.length === 1) {
         return { matched: true, reason: 'company_exact', candidate: exact[0], score: 1 };
     }
-    // Several candidates under the SAME company name is not a company problem — the
-    // company cannot separate them, so say so rather than picking one by position.
     if (exact.length > 1) {
+        // Two rows with the same company AND the same address are the SAME SITE recorded
+        // twice, not two buildings — ServiceTrade holds duplicates. Either books the same
+        // job, so refusing would be pedantry. Measured: "Guard and Grace" at 1801
+        // California Street exists as two rows, and the live system books against one of
+        // them quite happily.
+        //
+        // `matchAgainstRows` already applies this rule to its own tie guard; this is the
+        // same idea one level down.
+        if (allOneSite(exact)) {
+            return { matched: true, reason: 'company_exact', candidate: exact[0], score: 1 };
+        }
+        // Genuinely different buildings under one company. The company cannot separate
+        // them — say so rather than picking one by position.
         return { matched: false, reason: 'company_does_not_separate', candidates: exact };
     }
 
@@ -259,12 +337,17 @@ function narrowByCompany(candidates, statedCompany) {
 
     const [best, runnerUp] = scored;
     if (runnerUp && best.score - runnerUp.score < DECISIVE_MARGIN) {
+        const tied = scored.map((e) => e.candidate);
+        if (allOneSite(tied)) {
+            return { matched: true, reason: 'company_fuzzy', candidate: tied[0],
+                score: Number(best.score.toFixed(3)) };
+        }
         const sameCompany = normalizeText(best.candidate.companyName)
             === normalizeText(runnerUp.candidate.companyName);
         return {
             matched: false,
             reason: sameCompany ? 'company_does_not_separate' : 'company_ambiguous',
-            candidates: scored.map((e) => e.candidate)
+            candidates: tied
         };
     }
 
@@ -274,6 +357,42 @@ function narrowByCompany(candidates, statedCompany) {
         candidate: best.candidate,
         score: Number(best.score.toFixed(3))
     };
+}
+
+/**
+ * The sites belonging to a company the caller NAMED.
+ *
+ * A company search and nothing more. If the caller never names a company this never runs;
+ * if they name one we do not hold, it fails — and that failure is a real answer, not an
+ * error to route around.
+ *
+ * Reads the mirror rather than ServiceTrade. `GET /company?name=` is a substring match and
+ * would need two round trips mid-call; the mirror already carries every company name on
+ * `raw_response.company.name` and is refreshed hourly. Matching here also keeps one
+ * definition of "same company" instead of two that can disagree.
+ *
+ * Substring, not fuzzy, to mirror what `GET /company?name=` does — so a name that works on
+ * the live API works here and vice versa.
+ *
+ * @returns {{matched: boolean, reason: string, rows?: Array, companies?: Array}}
+ */
+function findByCompany(statedCompany, rows) {
+    const said = squash(statedCompany);
+    if (said.length < MIN_COMPANY_CHARS) {
+        return { matched: false, reason: 'company_too_short' };
+    }
+
+    // Every company whose name contains what they said. Three separate records share the
+    // name "Denver Public Schools", and all three are theirs as far as the caller knows.
+    const hits = rows.filter((row) => {
+        const name = squash(rowCompany(row).companyName);
+        return name.length > 0 && name.includes(said);
+    });
+
+    if (hits.length === 0) return { matched: false, reason: 'company_not_found' };
+
+    const companies = [...new Set(hits.map((row) => rowCompany(row).companyName))];
+    return { matched: true, reason: 'company_found', rows: hits, companies };
 }
 
 /**
@@ -294,16 +413,91 @@ function narrowByCompany(candidates, statedCompany) {
  * @param {string} spoken   the address as the caller gave it
  * @param {string} agentId  the tenant whose mirror to search; must be a configured sync agent
  */
-async function matchSpokenAddress(spoken, agentId) {
+/**
+ * The tenant whose mirror to read, or a reason we will not read one.
+ *
+ * ONE TENANT, NEVER THE UNION — see matchSpokenAddress for why that matters.
+ */
+function resolveTenant(agentId) {
     const agentIds = config.locationSyncAgentIds || [];
-    if (agentIds.length === 0) return { matched: false, reason: 'no_sync_agent_configured' };
+    if (agentIds.length === 0) return { error: 'no_sync_agent_configured' };
 
     // Fall back to the single configured tenant ONLY while there is exactly one, so the
     // existing Adaptive caller keeps working unchanged. With several configured, a caller
     // that names no tenant gets nothing — never a scan across all of them.
     const target = String(agentId || '').trim() || (agentIds.length === 1 ? agentIds[0] : '');
-    if (!target) return { matched: false, reason: 'no_sync_agent_configured' };
-    if (!agentIds.includes(target)) return { matched: false, reason: 'agent_not_synced' };
+    if (!target) return { error: 'no_sync_agent_configured' };
+    if (!agentIds.includes(target)) return { error: 'agent_not_synced' };
+    return { target };
+}
+
+/**
+ * Resolve a company the caller named, scoped to one tenant.
+ *
+ * `location` narrows the result when given — the caller said both, and both are their own
+ * statement. It is a FILTER over the company's sites, never a second search merged in.
+ */
+async function matchSpokenCompany(statedCompany, agentId, location) {
+    const { target, error } = resolveTenant(agentId);
+    if (error) return { matched: false, reason: error };
+
+    const rows = await supabaseService.getLocationsForAgent(target);
+    const found = findByCompany(statedCompany, rows);
+
+    const log = (result, extra = {}) => {
+        console.log(`[company-match] ${JSON.stringify({
+            statedCompany, agentId: target, rows: rows.length,
+            matched: result.matched, reason: result.reason, ...extra
+        })}`);
+        return result;
+    };
+
+    if (!found.matched) return log(found);
+
+    // One site under that name — nothing to ask.
+    if (found.rows.length === 1) {
+        const only = found.rows[0];
+        return log({
+            matched: true,
+            reason: 'company_resolved',
+            location: {
+                locationId: only.servicetrade_id,
+                locationName: only.name || '',
+                locationStatus: only.status || 'active',
+                address: rowAddress(only),
+                street: only.street || '',
+                city: only.city || '',
+                state: only.state || '',
+                postalCode: only.postal_code || '',
+                ...rowCompany(only)
+            }
+        }, { sites: 1 });
+    }
+
+    // They gave a location too — narrow the company's own sites with it. One result set.
+    if (String(location || '').trim()) {
+        const narrowed = matchAgainstRows(location, found.rows);
+        return log(
+            narrowed.matched
+                ? { matched: true, reason: 'company_then_location', location: narrowed.location }
+                : { matched: false, reason: 'company_needs_location', sites: found.rows.length,
+                    companies: found.companies.length },
+            { sites: found.rows.length, narrowedBy: 'location' }
+        );
+    }
+
+    // Several sites, and no location to narrow them. Ask for one — never read them out.
+    return log({
+        matched: false,
+        reason: 'company_needs_location',
+        sites: found.rows.length,
+        companies: found.companies.length
+    }, { sites: found.rows.length });
+}
+
+async function matchSpokenAddress(spoken, agentId) {
+    const { target, error } = resolveTenant(agentId);
+    if (error) return { matched: false, reason: error };
 
     const rows = await supabaseService.getLocationsForAgent(target);
 
@@ -323,6 +517,8 @@ async function matchSpokenAddress(spoken, agentId) {
 
 module.exports = {
     matchSpokenAddress,
+    matchSpokenCompany,
+    findByCompany,
     matchAgainstRows,
     narrowByCompany,
     rowAddress,
@@ -331,5 +527,7 @@ module.exports = {
     DECISIVE_MARGIN,
     MAX_OFFERED,
     MIN_COMPANY_CHARS,
+    MIN_NAME_CHARS,
+    squash,
     COMPANY_MATCH_THRESHOLD
 };

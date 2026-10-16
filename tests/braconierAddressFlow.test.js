@@ -99,7 +99,14 @@ test('the ambiguous branch rounds its scores like every other branch', () => {
     }
 });
 
-test('the candidate list is capped at MAX_OFFERED', () => {
+test('the candidate list is NOT capped — the cap is for speech, not for narrowing', () => {
+    // WAS: capped at MAX_OFFERED. That truncated the set the company question narrows, so
+    // a caller whose site ranked fifth could name their company correctly and still be
+    // refused. Measured on live data: 1801 California Street has 16 sites above threshold
+    // and "Guard and Grace" — a real tenant — fell outside the first four.
+    //
+    // Nothing reads these aloud; the route returns counts only. MAX_OFFERED still governs
+    // what a prompt may speak.
     const many = Array.from({ length: 9 }, (_, i) => row({
         servicetrade_id: 100 + i,
         street: '410 Kingsway Boulevard',
@@ -109,7 +116,35 @@ test('the candidate list is capped at MAX_OFFERED', () => {
     const result = matchAgainstRows('410 Kingsway Boulevard', many);
 
     assert.strictEqual(result.reason, 'ambiguous');
-    assert.strictEqual(result.candidates.length, MAX_OFFERED);
+    assert.strictEqual(result.candidates.length, many.length, 'every candidate must survive for narrowing');
+    assert.ok(many.length > MAX_OFFERED, 'the fixture must exceed the speech cap for this to mean anything');
+});
+
+test('duplicate rows for one site resolve instead of refusing', () => {
+    // ServiceTrade holds the same building twice: "Guard and Grace" at 1801 California
+    // Street is two rows with one company and one address. Either books the same job, so
+    // refusing on the grounds that the company "cannot separate them" is pedantry.
+    const dupes = [
+        { locationId: 11, address: '1801 California Street, Denver', score: 0.95, companyId: '7', companyName: 'Guard and Grace' },
+        { locationId: 22, address: '1801 California Street, Denver', score: 0.95, companyId: '7', companyName: 'Guard and Grace' }
+    ];
+    const narrowed = realNarrow(dupes, 'Guard and Grace');
+
+    assert.strictEqual(narrowed.matched, true);
+    assert.strictEqual(narrowed.candidate.locationId, 11);
+});
+
+test('two real buildings under one company still refuse', () => {
+    // The guard above must not swallow this: same company, DIFFERENT addresses, so the
+    // company genuinely cannot say which.
+    const twoSites = [
+        { locationId: 11, address: '1801 California Street, Denver', score: 0.95, companyId: '7', companyName: 'Denver Public Schools' },
+        { locationId: 22, address: '2285 South Federal Boulevard, Denver', score: 0.95, companyId: '7', companyName: 'Denver Public Schools' }
+    ];
+    const narrowed = realNarrow(twoSites, 'Denver Public Schools');
+
+    assert.strictEqual(narrowed.matched, false);
+    assert.strictEqual(narrowed.reason, 'company_does_not_separate');
 });
 
 // ------------------------------------------------------- narrowing by company

@@ -3,6 +3,7 @@ const router = express.Router();
 const { sendSuccessResponse } = require('../../utils/responseHelper');
 const {
     matchSpokenAddress,
+    matchSpokenCompany,
     narrowByCompany
 } = require('../../services/addressMatchService');
 
@@ -181,7 +182,10 @@ router.post('/st-match-address', async (req, res) => {
         const scoped = Boolean(agentId);
 
         // A whole address if we were given one, otherwise assemble the components.
-        const whole = pick('address', 'service_address', 'spoken_address', 'full_address');
+        // What the caller said about WHERE. An address or a building name — the matcher
+        // scores both and takes whichever is better, so the agent does not have to know
+        // which kind it heard. `address` stays as an alias so an older prompt keeps working.
+        const whole = pick('location', 'address', 'service_address', 'spoken_address', 'full_address');
         const street = pick('street', 'address_line1', 'street_address');
         const city = pick('city');
         const state = pick('state', 'province');
@@ -199,12 +203,63 @@ router.post('/st-match-address', async (req, res) => {
             spoken
         });
 
+        // ---- a company, with no location to go on ----------------------------
+        // A company search and nothing more. If they never name one this never runs; if
+        // they name one we do not hold, it fails, and that is a real answer.
+        if (scoped && statedCompany && !spoken) {
+            const byCompany = await matchSpokenCompany(statedCompany, agentId, '');
+
+            if (byCompany.matched) {
+                const loc = byCompany.location;
+                const question = `I have ${loc.address}, belonging to ${loc.companyName}. Is that right?`;
+                return matchedResponse(
+                    res, loc, '', question,
+                    `That company has one site. Say exactly: "${question}" A yes verifies them — `
+                    + 'then call this again with location_id set to st_location_id, copied exactly.'
+                );
+            }
+
+            if (byCompany.reason === 'company_needs_location') {
+                // Several sites under that name. The ADDRESS is what separates them — every
+                // site has its own, and they may not. Read none of them aloud.
+                const question = 'I have several locations under that company. '
+                    + 'Which address is the work at?';
+                return sendSuccessResponse(
+                    res,
+                    {
+                        ...baseVars(),
+                        reason: byCompany.reason,
+                        st_address_stage: 'location',
+                        st_company_question: question,
+                        candidate_count: String(byCompany.sites),
+                        distinct_company_count: String(byCompany.companies)
+                    },
+                    `That company has ${byCompany.sites} sites. Say exactly: "${question}" Read no `
+                    + 'address aloud. Then call this again with location set to what they say, '
+                    + 'and company unchanged.',
+                    200
+                );
+            }
+
+            // Not found, or too short to search. Never offer another customer's address.
+            return sendSuccessResponse(
+                res,
+                { ...baseVars(), reason: byCompany.reason, st_address_stage: 'parts' },
+                'We hold nothing under that company name. Say so plainly, offer no other company '
+                + 'or address, then ask for the address one part at a time — street number, then '
+                + 'street name, then state, then city, then ZIP.',
+                200
+            );
+        }
+
         if (!spoken) {
             return scoped
                 ? sendSuccessResponse(
                     res,
                     { ...baseVars(), reason: 'no_address_given' },
-                    'No address was provided. Ask which location the work is at, then call this again with that address.',
+                    'Ask: can you give me the address where the work is, or the company name on '
+                    + 'the account? Then call this again with location set to an address or a '
+                    + 'building name, or company set to a business name.',
                     200
                 )
                 : sendSuccessResponse(
@@ -218,6 +273,24 @@ router.post('/st-match-address', async (req, res) => {
         const result = await matchSpokenAddress(spoken, agentId);
 
         if (!scoped) return legacyResponse(res, result);
+
+        // ---- they gave a location AND a company -------------------------------
+        // Both are the caller's own statement, so both are usable. The company FILTERS
+        // what the location found — it is never a second search merged in. If the location
+        // found nothing, fall through to the company on its own rather than giving up.
+        if (statedCompany && !result.matched && result.reason !== 'ambiguous') {
+            const byCompany = await matchSpokenCompany(statedCompany, agentId, spoken);
+            if (byCompany.matched) {
+                const loc = byCompany.location;
+                const question = `I have ${loc.address}. Is that the right address?`;
+                return matchedResponse(
+                    res, loc, '', question,
+                    `The company and the address agree on one site. Say exactly: "${question}" `
+                    + 'A yes verifies them — then call this again with location_id set to '
+                    + 'st_location_id, copied exactly.'
+                );
+            }
+        }
 
         // ---- one site matched -------------------------------------------------
         if (result.matched) {
