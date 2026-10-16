@@ -910,6 +910,15 @@ asked, by the caller's own number, and said no account carries it.
 Router), exported from `verifyCustomer.js` as `verifyAgentIds` so there is one list. It logs
 in as that agent's tenant; an agent with no `servicetrade_tokens` row must never drive it.
 
+**UPDATED 2026-10-16:** `INBOUND_VERIFY_AGENT_IDS` is gone. The call-start route
+`/st-verify-customer-inbound` is no longer gated. It logs in with the calling agent's own
+`servicetrade_tokens` row, and an agent without one fails open as `lookup_error`. The gate had
+silently skipped the lookup for the router copy `agent_18eacd384c9e44ae2c2a43c52b`
+("Braconier Test"), so callers heard "your number is not on file" with no search run.
+This post-call step 4 stays scoped to Braconier's Main Router through `verifyAgentIds`, now a
+fixed one-id set in `verifyCustomer.js`. Its `false` blocks the job, and Adaptive must not
+start depending on it.
+
 A location id recovered by any of the four reaches job creation through `healedLocationId`.
 That chain also stopped using `??`, which stalls on the empty string Retell actually ships for
 an unresolved variable, and now takes the first non-empty.

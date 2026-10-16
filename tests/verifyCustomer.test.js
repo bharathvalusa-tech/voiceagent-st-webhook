@@ -422,6 +422,20 @@ test('inbound: an unknown number still lets the call through, with the retry fla
     assert.equal(vars.st_retry_allowed, 'true');
 });
 
+test('inbound: any agent with its own ServiceTrade login is looked up, not only the Main Router', async () => {
+    // A copy of the router (agent_18eac…, "Braconier Test") was skipped by the old
+    // INBOUND_VERIFY_AGENT_IDS gate and told callers their number was not on file without
+    // a search ever running. The login is per agent, so there is nothing left to gate.
+    loadRoute();
+    const calls = stubFetch(sideloaded());
+    const vars = (await invokeInbound({ agent_id: 'agent_18eacd384c9e44ae2c2a43c52b', from_number: '+13038758807' }))
+        .call_inbound.dynamic_variables;
+
+    assert.equal(vars.st_lookup_ok, 'true');
+    assert.equal(vars.st_customer_verified, 'true');
+    assert.ok(calls.length > 0, 'ServiceTrade must actually be searched');
+});
+
 // --- fail-open: none of these may stop a call connecting ---
 
 const failsOpen = (label, setup, callInbound = { agent_id: ROUTER_ID, from_number: '+13038758807' }, event) =>
@@ -441,9 +455,6 @@ failsOpen('no ServiceTrade token for the agent', () => {
     loadRoute(async () => { throw new Error('No ServiceTrade token found for this agent'); });
     stubFetch(sideloaded());
 });
-failsOpen('an agent that is not allowlisted',
-    () => { loadRoute(); stubFetch(sideloaded()); },
-    { agent_id: 'agent_someoneelse', from_number: '+13038758807' });
 failsOpen('a missing agent_id',
     () => { loadRoute(); stubFetch(sideloaded()); },
     { from_number: '+13038758807' });
