@@ -396,6 +396,40 @@ function findByCompany(statedCompany, rows) {
 }
 
 /**
+ * One mirrored site by its id, scoped to the tenant.
+ *
+ * The confirm turn's only job. The id is RE-READ rather than trusted, because the agent is
+ * the one sending it back: an id it invented, or one lifted from another tenant's call,
+ * must not reach createJob. Returns null for anything this tenant does not own.
+ */
+async function findLocationById(locationId, agentId) {
+    const { target, error } = resolveTenant(agentId);
+    if (error) return null;
+
+    const wanted = String(locationId || '').trim();
+    if (!wanted) return null;
+
+    const rows = await supabaseService.getLocationsForAgent(target);
+    const row = rows.find((r) => String(r.servicetrade_id) === wanted);
+    if (!row) {
+        console.log(`[confirm-site] ${JSON.stringify({ locationId: wanted, agentId: target, found: false })}`);
+        return null;
+    }
+
+    return {
+        locationId: row.servicetrade_id,
+        locationName: row.name || '',
+        locationStatus: row.status || 'active',
+        address: rowAddress(row),
+        street: row.street || '',
+        city: row.city || '',
+        state: row.state || '',
+        postalCode: row.postal_code || '',
+        ...rowCompany(row)
+    };
+}
+
+/**
  * Which tenant's mirrored rows to search.
  *
  * The rows are keyed by the agent the mirror is synced under, while the office-hours and
@@ -519,6 +553,7 @@ module.exports = {
     matchSpokenAddress,
     matchSpokenCompany,
     findByCompany,
+    findLocationById,
     matchAgainstRows,
     narrowByCompany,
     rowAddress,

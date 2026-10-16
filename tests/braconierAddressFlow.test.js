@@ -566,3 +566,67 @@ test('the parts ask names all five fields in order', async () => {
         assert.match(body.message, /Wait for each answer/);
     } finally { app.close(); }
 });
+
+// ---------------------------------------------------- the confirm turn
+
+test('confirming a site the tool offered verifies the caller', async () => {
+    // THE BUG THIS EXISTS FOR. Every branch tells the agent to come back with
+    // location_id copied from st_location_id. Until the route read it, that call fell
+    // through to "no address was provided" — so a caller who had just been matched was
+    // asked again, matched again, and then read the not-a-customer script. Seen on a live
+    // test call: the caller gave their address, confirmed it, and was still refused.
+    const app = await routeApp({
+        '../../services/addressMatchService': {
+            narrowByCompany: realNarrow,
+            matchSpokenAddress: async () => ({ matched: false, reason: 'no_candidate_above_threshold' }),
+            findLocationById: async (id) => (String(id) === '2776463860629889' ? {
+                locationId: 2776463860629889, locationName: '4925 Avalon Ridge Pkwy',
+                locationStatus: 'active', address: '4925 Avalon Ridge Parkway, Peachtree Corners, GA, 30071',
+                street: '4925 Avalon Ridge Parkway', city: 'Peachtree Corners', state: 'GA',
+                postalCode: '30071', companyId: '2776463859696001', companyName: 'CLARA AI'
+            } : null)
+        }
+    });
+    try {
+        const { body } = await post(app.port, { location_id: '2776463860629889' });
+        assert.strictEqual(body.data.address_found, 'true');
+        assert.strictEqual(body.data.reason, 'matched');
+        assert.strictEqual(body.data.st_location_id, '2776463860629889');
+        assert.strictEqual(body.data.st_company_name, 'CLARA AI');
+        assert.match(body.message, /Call caller_details/);
+        assert.doesNotMatch(body.message, /no address was provided/i);
+    } finally { app.close(); }
+});
+
+test('an id the agent invented is refused, never booked', async () => {
+    // The agent is the one sending the id back. One it made up, or lifted from another
+    // tenant's call, must not reach createJob.
+    const app = await routeApp({
+        '../../services/addressMatchService': {
+            narrowByCompany: realNarrow,
+            matchSpokenAddress: async () => ({ matched: false, reason: 'no_candidate_above_threshold' }),
+            findLocationById: async () => null
+        }
+    });
+    try {
+        const { body } = await post(app.port, { location_id: '9999999999999999' });
+        assert.strictEqual(body.data.address_found, 'false');
+        assert.strictEqual(body.data.reason, 'location_id_unknown');
+        assert.strictEqual(body.data.st_location_id, '', 'no site may be attached');
+        assert.match(body.message, /not one I gave you/);
+    } finally { app.close(); }
+});
+
+test('a confirm without an agent id stays on the legacy shape', async () => {
+    const app = await routeApp({
+        '../../services/addressMatchService': {
+            narrowByCompany: realNarrow,
+            matchSpokenAddress: async () => ({ matched: false, reason: 'no_candidate_above_threshold' }),
+            findLocationById: async () => { throw new Error('must not be called unscoped'); }
+        }
+    });
+    try {
+        const { body } = await post(app.port, { location_id: '2776463860629889' }, '');
+        assert.strictEqual(body.data.address_found, false, 'boolean — the Adaptive contract');
+    } finally { app.close(); }
+});
