@@ -577,15 +577,16 @@ router.post('/st-verify-customer', async (req, res) => {
 // only trips on a genuine ServiceTrade stall — and a stall must not hold up a ringing phone.
 const INBOUND_DEADLINE_MS = 4000;
 
-// Only Braconier's Main Router may drive the inbound route: it resolves against one tenant's
-// ServiceTrade account, and every Braconier call carries the router's agent id for its whole
-// life because agent_swap does not reassign it. Same scoping reason as /st-escalation-complete.
-const inboundAgentIds = new Set(
-    (process.env.INBOUND_VERIFY_AGENT_IDS || 'agent_41010d0d8c1f46cf1d9dfcddbf')
-        .split(',')
-        .map((id) => id.trim().toLowerCase())
-        .filter(Boolean)
-);
+// The inbound route is NOT allowlisted. It logs in with the calling agent's own
+// servicetrade_tokens row, so it can only ever search that agent's tenant, and an agent with
+// no row fails open in the catch below. The old INBOUND_VERIFY_AGENT_IDS gate added nothing
+// on top of that and silently skipped the lookup for every new router (a test copy read
+// "your number is not on file" without a search ever running).
+//
+// The POST-CALL re-check in retell.js stays scoped to Braconier's Main Router. There an
+// unknown number becomes a load-bearing "not a customer" that blocks the job, and Adaptive's
+// job creation must not start depending on it.
+const verifyAgentIds = new Set(['agent_41010d0d8c1f46cf1d9dfcddbf']);
 
 const withDeadline = (promise, ms) => Promise.race([
     promise,
@@ -645,9 +646,6 @@ router.post('/st-verify-customer-inbound', async (req, res) => {
         if (body.event && body.event !== 'call_inbound') {
             return failOpen(REASONS.lookupError, { skipped: 'unsupported_event', event: body.event });
         }
-        if (!inboundAgentIds.has(agentId.toLowerCase())) {
-            return failOpen(REASONS.lookupError, { skipped: 'agent_not_enabled' });
-        }
 
         const result = await withDeadline(
             resolveCustomer({ agentId, rawTerm: fromNumber, spokenLocation: '', attempt: 1 }),
@@ -668,4 +666,4 @@ module.exports.resolveCustomer = resolveCustomer;
 // so the job path never depends on the agent having asked, and it must not do that for an
 // agent whose id has no ServiceTrade credential row — `resolveCustomer` logs in as that
 // agent's tenant.
-module.exports.verifyAgentIds = inboundAgentIds;
+module.exports.verifyAgentIds = verifyAgentIds;
