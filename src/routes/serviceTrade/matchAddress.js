@@ -4,6 +4,7 @@ const { sendSuccessResponse } = require('../../utils/responseHelper');
 const {
     matchSpokenAddress,
     matchSpokenCompany,
+    findLocationById,
     narrowByCompany
 } = require('../../services/addressMatchService');
 
@@ -191,6 +192,7 @@ router.post('/st-match-address', async (req, res) => {
         const state = pick('state', 'province');
         const postal = pick('postal_code', 'postalCode', 'zip', 'postal');
         const statedCompany = pick('company', 'company_name', 'stated_company');
+        const confirmId = pick('location_id', 'locationId', 'site_id');
 
         const spoken = whole || [street, city, state, postal].filter(Boolean).join(', ');
 
@@ -202,6 +204,37 @@ router.post('/st-match-address', async (req, res) => {
             hasCompany: Boolean(statedCompany),
             spoken
         });
+
+        // ---- the caller confirmed a site we offered ---------------------------
+        // THE END OF THE FLOW. Every branch above tells the agent to come back here with
+        // location_id copied from st_location_id, and until this existed that call fell
+        // through to "no address was provided" — so a caller who had just been matched was
+        // asked again, matched again, and then read the not-a-customer script. Measured on
+        // a live test call.
+        //
+        // The id is re-read from the mirror rather than trusted: an id the model invented,
+        // or lifted from another tenant, must not book a job. Same rule matrix applies to
+        // its own confirm turn.
+        if (scoped && confirmId) {
+            const row = await findLocationById(confirmId, agentId);
+            if (row) {
+                return matchedResponse(
+                    res, row, '', '',
+                    'Confirmed. The caller is verified at this site. Call caller_details with '
+                    + 'locationId = st_location_id, companyId = st_company_id, companyName = '
+                    + 'st_company_name, customerVerified = true, then continue with the '
+                    + 'emergency workflow.'
+                );
+            }
+            // Not one of ours. Never book against it.
+            return sendSuccessResponse(
+                res,
+                { ...baseVars(), reason: 'location_id_unknown', st_address_stage: 'parts' },
+                'That site id is not one I gave you. Do not use it. Ask for the address one part '
+                + 'at a time — street number, then street name, then state, then city, then ZIP.',
+                200
+            );
+        }
 
         // ---- a company, with no location to go on ----------------------------
         // A company search and nothing more. If they never name one this never runs; if
