@@ -113,6 +113,18 @@ const config = {
         'agent_efbe503faedf1bf516f961979f',  // Adaptive Climate
         'agent_41010d0d8c1f46cf1d9dfcddbf'   // Braconier
     ]),
+    // Where a job goes when the caller's COMPANY is a customer but the address they gave is
+    // none of that company's sites. One ServiceTrade location per tenant, booked as a
+    // stand-in; the real company and the spoken address go into the job description.
+    // Tenants not listed here keep the old behaviour: no site, no job.
+    // Override as UNLISTED_SITE_LOCATION_IDS="agent_x:123,agent_y:456".
+    unlistedSiteLocationIds: Object.fromEntries(
+        parseIdList(process.env.UNLISTED_SITE_LOCATION_IDS, [
+            // Braconier -> CLARA AI, 4925 Avalon Ridge Pkwy, Peachtree Corners GA
+            'agent_41010d0d8c1f46cf1d9dfcddbf:2776463860629889'
+        ]).map((pair) => pair.split(':').map((part) => part.trim()))
+            .filter(([agent, location]) => agent && location)
+    ),
     matchingThresholds: {
         confidence: parseNumber(process.env.MATCH_CONFIDENCE_THRESHOLD, 80),
         fuzzySimilarity: parseNumber(process.env.FUZZY_SIMILARITY_THRESHOLD, 0.8),

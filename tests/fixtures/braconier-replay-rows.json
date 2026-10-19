@@ -1,0 +1,542 @@
+[
+ {
+  "servicetrade_id": "1495446009559232",
+  "name": "1801EATERY",
+  "street": "1801 CALIFORNIA ST",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491367045178241",
+    "name": "1801 EATERY"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495446112762048",
+  "name": "AVISONYOUNG",
+  "street": "1801 CALIFORNIA T #3750",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491370738120129",
+    "name": "AVISON YOUNG"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1991255501511873",
+  "name": "Big Wave Taco",
+  "street": "10155 East 29th Drive #110",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80238",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495446136436928",
+  "name": "BKACPA&ADVISORS",
+  "street": "1801 California ST",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491372105546753",
+    "name": "BKD CPA & Advisors"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451728066752",
+  "name": "Bubu - Granite Tower",
+  "street": "1099 18th Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "2000890774709249",
+  "name": "Bubu Republic",
+  "street": "303 16th Street #3",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495446161094848",
+  "name": "CBRE 1801",
+  "street": "1801 CALIFORNIA STREET",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491373777201601",
+    "name": "BROOKFIELD PROPERTIES"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495446214555840",
+  "name": "CENTURYLINK1801CALIF",
+  "street": "1801 CALIFORNIA STREET",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491376064476609",
+    "name": "CENTURYLINK 14th"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1645918246040705",
+  "name": "CBRE 1801",
+  "street": "1801 California Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1645911953054017",
+    "name": "BPREP 1801 California Street Owner LLC"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1947444808635137",
+  "name": "Guard and Grace",
+  "street": "1801 California Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "inactive",
+  "raw_response": {
+   "company": {
+    "id": "1491387824938433",
+    "name": "Guard and Grace"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1992362449801089",
+  "name": "TAG Burger Bar",
+  "street": "10155 East 29th Drive",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80238",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451726493888",
+  "name": "DO NOT USE",
+  "street": "1441 LARIMER STREET",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1782885001109377",
+  "name": "EGGS, INC.",
+  "street": "1750 Wewatta Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "inactive",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1636956455033793",
+  "name": "FAIRFIELD & WOODS",
+  "street": "1801 California Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1596182056832321",
+    "name": "FAIRFIELD LAW"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1953006638718849",
+  "name": "FBT Gibbons LLP",
+  "street": "1801 California Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1952878510528385",
+    "name": "FROSTBROWN TODD"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495450959280320",
+  "name": "FORVIS",
+  "street": "1801 CALIFORINA ST #2900",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491385744637505",
+    "name": "FORVIS"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495450985658560",
+  "name": "GERALDH.PHIPPS,INC",
+  "street": "1801 CALIFORNIA STREET",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "NULL",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491386623724609",
+    "name": "GERALD H. PHIPPS, INC"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495450988804288",
+  "name": "GIBSON,DUNN&CRUTCHER",
+  "street": "1801 CALIFORNIA STREET #4200",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491386695093889",
+    "name": "GIBSON, DUNN & CRUTCHER"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451106949312",
+  "name": "Guard and Grace",
+  "street": "1801 California Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491387824938433",
+    "name": "Guard and Grace"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1995568496071041",
+  "name": "HashTAG - Central Park",
+  "street": "10155 East 29th Drive",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80238",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "2251436687301761",
+  "name": "HashTAG - Downtown Denver",
+  "street": "1125 17th Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1992348196568193",
+  "name": "HashTAG - Highlands Ranch",
+  "street": "1485 Park Central Drive",
+  "city": "Highlands Ranch",
+  "state": "CO",
+  "postal_code": "80129",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451161884864",
+  "name": "HILTONGARDENINN",
+  "street": "9290 S MERIDIAN BLVD",
+  "city": "ENGLEWOOD",
+  "state": "CO",
+  "postal_code": "80112",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491388952786049",
+    "name": "HILTON GARDEN INN"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451168438464",
+  "name": "HOLYNAMECHURCH",
+  "street": "3290 W MILAN AVENUE",
+  "city": "SHERIDAN",
+  "state": "CO",
+  "postal_code": "80110",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491389137558977",
+    "name": "HOLY NAME CHURCH"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451354298560",
+  "name": "KUTAKROCK",
+  "street": "1801 CALIFORNIA ST SUIRE 3000",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491394726058945",
+    "name": "KUTAK ROCK"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1991315521060225",
+  "name": "Los Chingones DTC",
+  "street": "4959 South Newport Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80237",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1991341040663937",
+  "name": "Los Chingones Rino",
+  "street": "2463 Larimer Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80205",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "2429963936700929",
+  "name": "Mesa Verde Bar & Grill",
+  "street": "8500 Pena Boulevard",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80249",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "2565757643677505",
+    "name": "REGO RESTAURANT GROUP"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451455109312",
+  "name": "MESAMOVING&STORAGE",
+  "street": "1801 CALIFORNIA ST",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491398376388097",
+    "name": "MESA MOVING & STORAGE"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451548121280",
+  "name": "PEACELUTHERANCHURCH",
+  "street": "5675 FIELD STREET",
+  "city": "ARVADA",
+  "state": "CO",
+  "postal_code": "80002",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491402011662465",
+    "name": "PEACE LUTHERAN CHURCH"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "2159331706472641",
+  "name": "Tag Headquarters",
+  "street": "3457 Ringsby Court Unit 202",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80216",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451726035136",
+  "name": "TAGBURGERBAR",
+  "street": "1222 MADISON ST",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80206",
+  "status": "inactive",
+  "raw_response": {
+   "company": {
+    "id": "1491408400939457",
+    "name": "TAG BURGER BAR"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451726887104",
+  "name": "TAGRESTAURANT",
+  "street": "1221 MADISON ST",
+  "city": "DENVER",
+  "state": "CO",
+  "postal_code": "80206",
+  "status": "inactive",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "1495451727247552",
+  "name": "TAGRESTAURANT",
+  "street": "3033 BRIGHTON BLVD",
+  "city": "BRIGHTON",
+  "state": "CO",
+  "postal_code": "80216",
+  "status": "inactive",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "2601079271595137",
+  "name": "Republic Plaza",
+  "street": "370 17th Street",
+  "city": "Denver",
+  "state": "CO",
+  "postal_code": "80202",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "1491408424172545",
+    "name": "TAG RESTAURANT"
+   }
+  }
+ },
+ {
+  "servicetrade_id": "2776463860629889",
+  "name": "4925 Avalon Ridge Pkwy",
+  "street": "4925 Avalon Ridge Parkway",
+  "city": "Peachtree Corners",
+  "state": "GA",
+  "postal_code": "30071",
+  "status": "active",
+  "raw_response": {
+   "company": {
+    "id": "2776463859696001",
+    "name": "CLARA AI"
+   }
+  }
+ }
+]

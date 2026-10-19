@@ -266,9 +266,19 @@ test('a tenant that is not in the sync list is refused, not searched', async () 
 
 // ------------------------------------------------------------------ the route
 
+// What a test does not mock behaves as "nothing found": no company elsewhere in the book,
+// and no stand-in site configured — the behaviour every test here was written against.
+const SERVICE_DEFAULTS = {
+    matchSpokenCompany: async () => ({ matched: false, reason: 'company_not_found' }),
+    unlistedSite: () => null,
+    findCompanyById: async () => null
+};
+
 const routeApp = async (mocks) => {
     const express = require('express');
-    const router = loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/matchAddress'), mocks);
+    const key = '../../services/addressMatchService';
+    const withDefaults = { ...mocks, [key]: { ...SERVICE_DEFAULTS, ...(mocks[key] || {}) } };
+    const router = loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/matchAddress'), withDefaults);
     const app = express();
     app.use(express.json());
     app.use('/', router);
@@ -316,6 +326,9 @@ test('one match reads the address back and asks the company', async () => {
         assert.match(body.data.st_company_question, /1617 S Acoma St/);
         // A no leads to the parts ask, not a refusal.
         assert.match(body.message, /one part at a time/);
+        // Only OFFERED, not confirmed: the caller may still say no, so this turn must not
+        // read as verified to the post-call sheet writer.
+        assert.notStrictEqual(body.data.st_customer_verified, 'true');
     } finally { app.close(); }
 });
 
@@ -593,6 +606,10 @@ test('confirming a site the tool offered verifies the caller', async () => {
         assert.strictEqual(body.data.reason, 'matched');
         assert.strictEqual(body.data.st_location_id, '2776463860629889');
         assert.strictEqual(body.data.st_company_name, 'CLARA AI');
+        // The post-call sheet writer counts a caller as verified only from this field.
+        // Missing, call_ea34e0ada1ceccdfd9f35d19576 was written as not a customer and no
+        // technician was dialled.
+        assert.strictEqual(body.data.st_customer_verified, 'true');
         assert.match(body.message, /Call caller_details/);
         assert.doesNotMatch(body.message, /no address was provided/i);
     } finally { app.close(); }
@@ -613,6 +630,7 @@ test('an id the agent invented is refused, never booked', async () => {
         assert.strictEqual(body.data.address_found, 'false');
         assert.strictEqual(body.data.reason, 'location_id_unknown');
         assert.strictEqual(body.data.st_location_id, '', 'no site may be attached');
+        assert.notStrictEqual(body.data.st_customer_verified, 'true');
         assert.match(body.message, /not one I gave you/);
     } finally { app.close(); }
 });
