@@ -231,6 +231,38 @@ class SupabaseService {
         }
     }
 
+    /**
+     * Active customer companies for one tenant, from `servicetrade_companies`.
+     *
+     * Read for the companies the location mirror cannot show: a company with no site never
+     * appears on a location row, so a caller naming one was told we hold nothing for them.
+     * Measured on Braconier: 130 active customer companies with no site at all.
+     *
+     * `customer` is ServiceTrade's own flag, the same gate the phone lookup uses, so a
+     * vendor or a prospect is never returned.
+     */
+    async getCustomerCompaniesForAgent(agentId) {
+        const PAGE = 1000;
+        const rows = [];
+
+        for (let from = 0; ; from += PAGE) {
+            const { data, error } = await supabase
+                .from('servicetrade_companies')
+                .select('servicetrade_id,name,status,street,city,state,postal_code')
+                .eq('agent_id', agentId)
+                .eq('status', 'active')
+                .eq('raw_response->>customer', 'true')
+                .range(from, from + PAGE - 1);
+
+            if (error) {
+                throw new Error(`Supabase error: ${error.message}`);
+            }
+
+            rows.push(...(data || []));
+            if (!data || data.length < PAGE) return rows;
+        }
+    }
+
     async getJobConfig(agentId) {
         try {
             const { data, error } = await supabase

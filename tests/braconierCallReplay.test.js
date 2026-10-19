@@ -20,10 +20,21 @@ const GUARD_AND_GRACE_ACTIVE = '1495451106949312';
 const GUARD_AND_GRACE_INACTIVE = '1947444808635137';
 // CLARA AI, 4925 Avalon Ridge Pkwy — where a customer's unlisted site is filed.
 const STAND_IN = '2776463860629889';
+// Active customer companies (servicetrade_companies, customer = true). ALLISON PERKINS and
+// ARCHITECTURAL SURFACES have no site at all — two of Braconier's 130. Guard and Grace has
+// sites and must still be answered from them.
+const COMPANIES = [
+    { servicetrade_id: 1491368906712193, name: 'ALLISON PERKINS', status: 'active', street: '3600 S GILPIN ST', city: 'ENGLEWOOD', state: 'CO', postal_code: '80013' },
+    { servicetrade_id: 1736235934816641, name: 'ARCHITECTURAL SURFACES', status: 'active', street: '10000 E 40TH AVE', city: 'DENVER', state: 'CO', postal_code: '80238' },
+    { servicetrade_id: 1491387824938433, name: 'Guard and Grace', status: 'active', street: '1801 California Street', city: 'Denver', state: 'CO', postal_code: '80202' }
+];
 
 async function replayApp() {
     const service = loadWithMocks(path.join(REPO, 'src/services/addressMatchService'), {
-        './supabaseService': { getLocationsForAgent: async () => ROWS },
+        './supabaseService': {
+            getLocationsForAgent: async () => ROWS,
+            getCustomerCompaniesForAgent: async () => COMPANIES
+        },
         '../config/environment': { locationSyncAgentIds: [AGENT], unlistedSiteLocationIds: { [AGENT]: STAND_IN } }
     });
     const router = loadWithMocks(path.join(REPO, 'src/routes/serviceTrade/matchAddress'), {
@@ -274,5 +285,55 @@ test('a problem description passed as the location never books the stand-in', as
         const res = await app.ask({ location: 'Drink leak.', company: 'Guard and Grace' });
         assert.notStrictEqual(res.st_site_on_file, 'false');
         assert.notStrictEqual(res.st_location_id, STAND_IN);
+    } finally { app.close(); }
+});
+
+// ------------------------------ a customer company with NO site at all (call_2a4ba2fff…)
+
+test('call_2a4ba2fff: "Allison Perkins", a customer with no site, is asked for the address', async (t) => {
+    quiet(t);
+    const app = await replayApp();
+    try {
+        // Was: company_not_found — "We hold nothing under that company name".
+        const said = await app.ask({ company: 'Allison Perkins' });
+        assert.strictEqual(said.reason, 'company_needs_address');
+        assert.strictEqual(said.st_address_stage, 'location');
+        assert.match(said.st_company_question, /I have ALLISON PERKINS on file\. What is the address where the work is\?/);
+        assert.strictEqual(said.st_location_id, '');
+    } finally { app.close(); }
+});
+
+test('call_2a4ba2fff: with the address, the siteless customer is offered the stand-in, then verified', async (t) => {
+    quiet(t);
+    const app = await replayApp();
+    try {
+        const offered = await app.ask({ location: '3600 South Gilvin Street, Englewood', company: 'Allison Perkins' });
+        assert.strictEqual(offered.st_site_on_file, 'false');
+        assert.strictEqual(offered.st_location_id, STAND_IN);
+        assert.strictEqual(offered.st_company_id, '1491368906712193');
+        assert.notStrictEqual(offered.st_customer_verified, 'true');
+
+        const confirmed = await app.ask({ location_id: STAND_IN, company_id: '1491368906712193', location: '3600 South Gilvin Street, Englewood' });
+        assert.strictEqual(confirmed.st_customer_verified, 'true');
+        assert.strictEqual(confirmed.st_company_name, 'ALLISON PERKINS');
+    } finally { app.close(); }
+});
+
+test('a company with sites is still answered from its sites, not the company list', async (t) => {
+    quiet(t);
+    const app = await replayApp();
+    try {
+        const res = await app.ask({ company: 'Guard and Grace' });
+        assert.strictEqual(res.st_location_id, GUARD_AND_GRACE_ACTIVE);
+        assert.strictEqual(res.st_site_on_file, '');
+    } finally { app.close(); }
+});
+
+test('a name that is no customer at all is still refused', async (t) => {
+    quiet(t);
+    const app = await replayApp();
+    try {
+        const res = await app.ask({ company: 'Joe Nobody Plumbing' });
+        assert.strictEqual(res.reason, 'company_not_found');
     } finally { app.close(); }
 });
