@@ -595,7 +595,23 @@ async function matchSpokenCompany(statedCompany, agentId, location) {
         return result;
     };
 
-    if (!found.matched) return log(found);
+    if (!found.matched) {
+        // Nobody with a site goes by that name. A customer with NO site at all never shows on
+        // a location row, so look in the company list before calling it a stranger.
+        // call_2a4ba2fff…: "Allison Perkins" — an active ServiceTrade customer with zero
+        // sites — was told we hold nothing for them.
+        if (found.reason !== 'company_not_found') return log(found);
+        const siteless = await findSitelessCompany(statedCompany, target, rows);
+        if (!siteless) return log(found);
+        const spoken = String(location || '').trim();
+        if (spoken && looksLikeAddress(spoken)) {
+            return log({ matched: false, reason: 'company_no_site', company: siteless, spoken },
+                { siteless: true });
+        }
+        // A customer, but nowhere to send anyone yet. Ask where the work is.
+        return log({ matched: false, reason: 'company_needs_address', company: siteless },
+            { siteless: true });
+    }
 
     const asLocation = (row) => ({
         locationId: row.servicetrade_id,
@@ -660,6 +676,44 @@ async function matchSpokenCompany(statedCompany, agentId, location) {
     }, { sites: found.rows.length });
 }
 
+/**
+ * An active customer company with NO site, named by the caller.
+ *
+ * Same name rules as findByCompany, run over company records instead of location rows:
+ * each siteless company becomes a pseudo-row carrying only its company, so "one company
+ * name" and "close misheard name" mean exactly what they mean for companies with sites.
+ * Companies that do have a site are left out — those are findByCompany's to answer.
+ *
+ * Returns { companyId, companyName, address } or null.
+ */
+async function findSitelessCompany(statedCompany, target, locationRows) {
+    let companies;
+    try {
+        companies = await supabaseService.getCustomerCompaniesForAgent(target);
+    } catch (error) {
+        console.log(`[company-match] siteless lookup failed: ${error.message}`);
+        return null;
+    }
+    const withSites = new Set(locationRows.map((row) => rowCompany(row).companyId).filter(Boolean));
+    const pseudoRows = (companies || [])
+        .filter((c) => !withSites.has(String(c.servicetrade_id)))
+        .map((c) => ({
+            servicetrade_id: `company:${c.servicetrade_id}`,
+            raw_response: { company: { id: c.servicetrade_id, name: c.name } },
+            companyRecord: c
+        }));
+    const found = findByCompany(statedCompany, pseudoRows);
+    if (!found.matched) return null;
+    const company = soleCompany(found.rows);
+    if (!company) return null;
+    const record = found.rows.find((row) => rowCompany(row).companyId === company.companyId).companyRecord;
+    return {
+        ...company,
+        address: [record.street, record.city, record.state, record.postal_code]
+            .map((part) => String(part || '').trim()).filter(Boolean).join(', ')
+    };
+}
+
 // The one company a set of rows belongs to, or null when they span differently named
 // companies. Same-named records ("Denver Public Schools" exists three times) count as one;
 // the record holding the most sites is the one booked.
@@ -716,7 +770,15 @@ async function findCompanyById(companyId, agentId) {
     if (!wanted) return null;
     const rows = await supabaseService.getLocationsForAgent(target);
     const row = rows.find((r) => rowCompany(r).companyId === wanted);
-    return row ? rowCompany(row) : null;
+    if (row) return rowCompany(row);
+    // A customer with no site is still a customer — it is only in the company list.
+    try {
+        const companies = await supabaseService.getCustomerCompaniesForAgent(target);
+        const company = (companies || []).find((c) => String(c.servicetrade_id) === wanted);
+        return company ? { companyId: String(company.servicetrade_id), companyName: company.name } : null;
+    } catch (error) {
+        return null;
+    }
 }
 
 async function matchSpokenAddress(spoken, agentId) {

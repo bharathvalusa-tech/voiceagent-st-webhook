@@ -324,6 +324,28 @@ router.post('/st-match-address', async (req, res) => {
                 );
             }
 
+            // A customer with no site on file at all. Their address is the only place a
+            // technician can go, so ask for it; the next call files it at the stand-in.
+            if (byCompany.reason === 'company_needs_address' && unlistedSite(agentId, byCompany.company, '')) {
+                const question = `I have ${byCompany.company.companyName} on file. `
+                    + 'What is the address where the work is?';
+                return sendSuccessResponse(
+                    res,
+                    {
+                        ...baseVars(),
+                        reason: byCompany.reason,
+                        st_address_stage: 'location',
+                        st_company_question: question,
+                        st_company_name: byCompany.company.companyName,
+                        candidate_count: '0',
+                        distinct_company_count: '1'
+                    },
+                    `That company is a customer with no site on file. Say exactly: "${question}" `
+                    + 'Then call this again with location set to what they say, and company unchanged.',
+                    200
+                );
+            }
+
             if (byCompany.reason === 'company_needs_location') {
                 // Several sites under that name. The ADDRESS is what separates them — every
                 // site has its own, and they may not. Read none of them aloud.

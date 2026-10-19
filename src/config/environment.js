@@ -113,6 +113,15 @@ const config = {
         'agent_efbe503faedf1bf516f961979f',  // Adaptive Climate
         'agent_41010d0d8c1f46cf1d9dfcddbf'   // Braconier
     ]),
+    // The state a tenant works in, used to keep a spoken address from geocoding to a
+    // same-named town elsewhere (Englewood CO vs Englewood NJ). Override as
+    // SERVICE_AREA_STATES="agent_x:CO,agent_y:ON".
+    serviceAreaStates: Object.fromEntries(
+        parseIdList(process.env.SERVICE_AREA_STATES, [
+            'agent_41010d0d8c1f46cf1d9dfcddbf:CO'   // Braconier
+        ]).map((pair) => pair.split(':').map((part) => part.trim()))
+            .filter(([agent, state]) => agent && state)
+    ),
     // Where a job goes when the caller's COMPANY is a customer but the address they gave is
     // none of that company's sites. One ServiceTrade location per tenant, booked as a
     // stand-in; the real company and the spoken address go into the job description.

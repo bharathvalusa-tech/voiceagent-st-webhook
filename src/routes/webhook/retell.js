@@ -2,12 +2,13 @@
 const express = require('express');
 const { waitUntil } = require('@vercel/functions');
 const retellService = require('../../services/retellService');
-const { validateAddress, buildAddressQuery } = require('../../services/googleMapsService');
+const { validateAddress, buildAddressQuery, houseNumberOf } = require('../../services/googleMapsService');
 const { findCustomerWithConfidence } = require('../../services/customerMatchingService');
 const { createJob } = require('../../controllers/serviceTradeController');
 const emailNotificationService = require('../../services/emailNotificationService');
 const { disambiguateLocations } = require('../../services/gptDisambiguationService');
 const supabaseService = require('../../services/supabaseService');
+const config = require('../../config/environment');
 const { resolveCustomerVerdict } = require('../../services/customerVerdictService');
 const { resolveCustomer, verifyAgentIds } = require('../serviceTrade/verifyCustomer');
 const router = express.Router();
@@ -101,6 +102,11 @@ const buildJobDescription = (issueDescription, callerName, callerPhone, currentN
         ? ` SITE NOT ON FILE - customer: ${unlistedSite.companyName || 'unknown'}`
             + `${unlistedSite.companyId ? ` (company ${unlistedSite.companyId})` : ''}`
             + `, service address given by caller: ${unlistedSite.address || 'not given'}.`
+            + (unlistedSite.statedCompany
+                && String(unlistedSite.statedCompany).trim().toLowerCase()
+                    !== String(unlistedSite.companyName || '').trim().toLowerCase()
+                ? ` Caller named the company as: ${unlistedSite.statedCompany}.`
+                : '')
         : '';
 
     const rawDescription = (issueDescription || '').trim();
@@ -617,6 +623,9 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         // must reach job creation rather than being re-derived from a transcribed address.
         let healedLocationId = '';
         let unlistedSite = null;
+        // True only when a lookup verified the caller (not the analyser's guess). The job's
+        // stand-in fallback below may only ever act on that.
+        let callVerified = false;
         let extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis, resolvedDynamicVars);
 
         const needsRetellFetch =
@@ -740,6 +749,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
 
         healedLocationId = verdict.locationId;
         unlistedSite = verdict.unlistedSite || null;
+        callVerified = verdict.verified === true;
 
         const existingCustomerFlag = verdict.verified ?? normalizeBool(
             resolvedDynamicVars?.customerVerified
@@ -942,7 +952,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
                     city: addressCity,
                     state: addressState,
                     postalCode: addressPostal
-                });
+                }, { state: (config.serviceAreaStates || {})[agentId] });
                 
                 if (validatedAddress) {
                     addressForMatching = [
@@ -1166,6 +1176,40 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
             }
         }
 
+        // --- Verified customer, no site we can trust: the tenant's stand-in site ---
+        // The technician dispatch gate (the sheet) calls a technician for a verified
+        // emergency with an address and a description. The job gate used to stop here for
+        // manual review instead, so a technician could be sent on a job that did not exist:
+        // call_2a4ba2fff… rang the technician and created nothing. Same rule as the in-call
+        // flow: a verified customer whose site is not on file gets the stand-in, with the
+        // company and the caller's address at the top of the description.
+        const preGreetingVars = call?.retell_llm_dynamic_variables || {};
+        const firstText = (...values) => values.map((v) => String(v ?? '').trim()).find(Boolean) || '';
+        const verifiedCompany = {
+            companyName: firstText(resolvedDynamicVars?.companyName, resolvedDynamicVars?.st_company_name,
+                preGreetingVars.st_company_name),
+            companyId: firstText(resolvedDynamicVars?.companyId, resolvedDynamicVars?.st_company_id,
+                preGreetingVars.st_company_id)
+        };
+        const standInLocationId = (config.unlistedSiteLocationIds || {})[agentId];
+        const standInCandidate = (!inCallCandidate && callVerified && standInLocationId
+            && rawAddress && houseNumberOf(rawAddress))
+            ? {
+                tier: 1,
+                source: 'stand_in',
+                locationId: standInLocationId,
+                locationName: 'Site not on file',
+                companyName: verifiedCompany.companyName,
+                address: rawAddress,
+                contactId: '',
+                tierReason: 'verified customer, site not on file - booked at the stand-in site'
+            }
+            : null;
+
+        if (candidates.length === 0 && standInCandidate) {
+            candidates = [standInCandidate];
+        }
+
         // No candidates at all
         if (candidates.length === 0) {
             logWithContext('error', 'No matching locations found', {
@@ -1191,6 +1235,16 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         const tier1Candidates = candidates.filter(c => c.tier === 1 && c.locationId);
         const tier2Candidates = candidates.filter(c => c.tier === 2 && c.locationId);
         const tier3Candidates = candidates.filter(c => c.tier === 3 && c.locationId);
+
+        // Only weak guesses: none of them is the caller's site. A verified caller is booked at
+        // the stand-in rather than sent to manual review.
+        if (standInCandidate && tier1Candidates.length === 0 && tier2Candidates.length === 0) {
+            logWithContext('info', 'No trusted site for a verified caller - using the stand-in site', {
+                callId, agentId, standInLocationId, tier3Count: tier3Candidates.length,
+                verifiedCompany: verifiedCompany.companyName || null
+            });
+            tier1Candidates.push(standInCandidate);
+        }
 
         let selectedCandidate = null;
         let matchTier = null;
@@ -1327,7 +1381,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         // A caller-confirmed location is not re-litigated against the transcript. The
         // validator compares a candidate with what was *said*, which is the right test for a
         // fuzzy match and the wrong one here: the caller was read this address and agreed to it.
-        const candidateValidation = selectedCandidate?.source === 'in_call'
+        const candidateValidation = ['in_call', 'stand_in'].includes(selectedCandidate?.source)
             ? { isValid: true, reason: 'confirmed_in_call', checks: null }
             : validateCandidateAgainstRetellData({
                 candidate: selectedCandidate,
@@ -1366,8 +1420,15 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         const callerPhoneForDescription = extractedFields.callerPhone || call?.from_number || call?.fromNumber || null;
         const currentNode = resolvedDynamicVars?.current_node || resolvedDynamicVars?.currentNode || null;
         // Only when the job really is going to the stand-in the call confirmed.
-        const jobUnlistedSite = unlistedSite && String(selectedCandidate.locationId) === String(healedLocationId)
-            ? unlistedSite : null;
+        const jobUnlistedSite = selectedCandidate.source === 'stand_in'
+            ? {
+                companyName: verifiedCompany.companyName,
+                companyId: verifiedCompany.companyId,
+                address: rawAddress,
+                statedCompany: companyName
+            }
+            : (unlistedSite && String(selectedCandidate.locationId) === String(healedLocationId)
+                ? unlistedSite : null);
         const jobDescription = buildJobDescription(issueDescription, callerName, callerPhoneForDescription, currentNode, jobUnlistedSite);
 
         const jobResult = await createJob(
