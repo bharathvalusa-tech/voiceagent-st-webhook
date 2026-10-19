@@ -5,7 +5,9 @@ const {
     matchSpokenAddress,
     matchSpokenCompany,
     findLocationById,
-    narrowByCompany
+    narrowByCompany,
+    unlistedSite,
+    findCompanyById
 } = require('../../services/addressMatchService');
 
 /**
@@ -78,7 +80,11 @@ const baseVars = () => ({
     postal_code: '',
     match_score: '',
     candidate_count: '',
-    distinct_company_count: ''
+    distinct_company_count: '',
+    // 'false' when the caller's company is a customer but the address they gave is none of
+    // its sites: st_location_id is then the tenant's stand-in site, st_company_* is the
+    // caller's real company, and st_matched_address is what the caller said.
+    st_site_on_file: ''
 });
 
 const distinctCompanies = (candidates) =>
@@ -132,11 +138,12 @@ function legacyResponse(res, result) {
 }
 
 // ------------------------------------------------------------- Braconier shape
-function matchedResponse(res, loc, score, question, message) {
+function matchedResponse(res, loc, score, question, message, extra = {}) {
     return sendSuccessResponse(
         res,
         {
             ...baseVars(),
+            ...extra,
             address_found: 'true',
             reason: 'matched',
             st_location_id: String(loc.locationId || ''),
@@ -153,6 +160,21 @@ function matchedResponse(res, loc, score, question, message) {
         },
         message,
         200
+    );
+}
+
+// The caller's company is a customer, their address is not one of its sites. The job is
+// filed at the tenant's stand-in site with the real company and address in the description.
+function unlistedResponse(res, loc) {
+    const question = `I have you under ${loc.companyName}. ${loc.address} isn't one of the `
+        + 'sites we have on file for them, so I\'ll log the work at that address. Is that right?';
+    return matchedResponse(
+        res, loc, '', question,
+        `The company is a customer but this address is not one of its sites. Say exactly: `
+        + `"${question}" A yes verifies them — then call this again with location_id = `
+        + 'st_location_id, company_id = st_company_id and location = the same address, all '
+        + 'copied exactly. A no means ask for the address one part at a time.',
+        { st_site_on_file: 'false' }
     );
 }
 
@@ -193,6 +215,7 @@ router.post('/st-match-address', async (req, res) => {
         const postal = pick('postal_code', 'postalCode', 'zip', 'postal');
         const statedCompany = pick('company', 'company_name', 'stated_company');
         const confirmId = pick('location_id', 'locationId', 'site_id');
+        const confirmCompanyId = pick('company_id', 'companyId');
 
         const spoken = whole || [street, city, state, postal].filter(Boolean).join(', ');
 
@@ -216,14 +239,63 @@ router.post('/st-match-address', async (req, res) => {
         // or lifted from another tenant, must not book a job. Same rule matrix applies to
         // its own confirm turn.
         if (scoped && confirmId) {
+            // The stand-in site, confirmed for a company that is not its own: an unlisted
+            // site. The company id is re-read like the location id; one this tenant does not
+            // hold is refused.
+            const standIn = unlistedSite(agentId, { companyId: confirmCompanyId, companyName: '' }, whole);
+            if (standIn && String(confirmId) === String(standIn.locationId) && confirmCompanyId) {
+                const company = await findCompanyById(confirmCompanyId, agentId);
+                const ownRow = await findLocationById(confirmId, agentId);
+                const isStandInsOwnCompany = ownRow && String(ownRow.companyId) === String(confirmCompanyId);
+                if (company && !isStandInsOwnCompany) {
+                    if (!whole) {
+                        return sendSuccessResponse(
+                            res,
+                            { ...baseVars(), reason: 'unlisted_site_needs_address', st_address_stage: 'parts' },
+                            'Call this again with location_id, company_id AND location set to the '
+                            + 'address the caller gave. Without the address the job has nowhere to '
+                            + 'send the technician.',
+                            200
+                        );
+                    }
+                    const loc = unlistedSite(agentId, company, whole);
+                    return matchedResponse(
+                        res, loc, '', '',
+                        'Confirmed. The caller is verified under their company; the site is not on '
+                        + 'file and the work is logged at the address they gave. Call caller_details '
+                        + 'with locationId = st_location_id, companyId = st_company_id, companyName = '
+                        + 'st_company_name, customerVerified = true, then continue with the '
+                        + 'emergency workflow.',
+                        { st_customer_verified: 'true', st_site_on_file: 'false' }
+                    );
+                }
+                if (!company) {
+                    return sendSuccessResponse(
+                        res,
+                        { ...baseVars(), reason: 'company_id_unknown', st_address_stage: 'parts' },
+                        'That company id is not one I gave you. Do not use it. Ask for the address '
+                        + 'one part at a time — street number, then street name, then state, then '
+                        + 'city, then ZIP.',
+                        200
+                    );
+                }
+            }
+
             const row = await findLocationById(confirmId, agentId);
             if (row) {
+                // st_customer_verified is the field the post-call sheet writer reads
+                // (vercel-webhook-integration api/braconier.py, resolve_st_verdict). Without
+                // it a caller verified here was written as not a customer, and the Apps
+                // Script refused to dial a technician the agent had already promised —
+                // call_ea34e0ada1ceccdfd9f35d19576. Only this turn carries it: the earlier
+                // turns only OFFER a site, and the caller may still say no.
                 return matchedResponse(
                     res, row, '', '',
                     'Confirmed. The caller is verified at this site. Call caller_details with '
                     + 'locationId = st_location_id, companyId = st_company_id, companyName = '
                     + 'st_company_name, customerVerified = true, then continue with the '
-                    + 'emergency workflow.'
+                    + 'emergency workflow.',
+                    { st_customer_verified: 'true' }
                 );
             }
             // Not one of ours. Never book against it.
@@ -313,6 +385,10 @@ router.post('/st-match-address', async (req, res) => {
         // found nothing, fall through to the company on its own rather than giving up.
         if (statedCompany && !result.matched && result.reason !== 'ambiguous') {
             const byCompany = await matchSpokenCompany(statedCompany, agentId, spoken);
+            if (byCompany.reason === 'company_no_site') {
+                const loc = unlistedSite(agentId, byCompany.company, byCompany.spoken);
+                if (loc) return unlistedResponse(res, loc);
+            }
             if (byCompany.matched) {
                 const loc = byCompany.location;
                 const question = `I have ${loc.address}. Is that the right address?`;
@@ -375,6 +451,16 @@ router.post('/st-match-address', async (req, res) => {
                         + 'verifies them — then call this again with location_id set to '
                         + 'st_location_id, copied exactly.'
                     );
+                }
+
+                // Nobody at this building is theirs — but the company may be a customer with
+                // its sites elsewhere. Then the work is filed at the stand-in site.
+                if (narrowed.reason === 'company_not_found') {
+                    const byCompany = await matchSpokenCompany(statedCompany, agentId, spoken);
+                    if (byCompany.reason === 'company_no_site') {
+                        const loc = unlistedSite(agentId, byCompany.company, byCompany.spoken);
+                        if (loc) return unlistedResponse(res, loc);
+                    }
                 }
 
                 // The company did not separate them, or we hold nothing under that name.

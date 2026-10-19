@@ -105,6 +105,19 @@ const scanToolResults = (call) => {
         if (!best || (!best.locationId && asLocationId(data.st_location_id))) {
             best = { locationId: asLocationId(data.st_location_id) };
         }
+        // A company verified with its site NOT on file (/st-match-address): the location id
+        // is the tenant's stand-in, so the job needs the real company and the address the
+        // caller gave. The last such confirmation wins, as it is the one the caller agreed to.
+        if (String(data.st_site_on_file).toLowerCase() === 'false' && asLocationId(data.st_location_id)) {
+            best = {
+                locationId: asLocationId(data.st_location_id),
+                unlistedSite: {
+                    companyId: String(data.st_company_id || ''),
+                    companyName: String(data.st_company_name || ''),
+                    address: String(data.st_matched_address || '')
+                }
+            };
+        }
     }
 
     return best;
@@ -228,7 +241,8 @@ async function resolveCustomerVerdict({ call, dynamicVars, agentId, allowLookup,
             verified: callVerified ? true : null,
             locationId: callLocationId,
             source: callSource || 'none',
-            searched: false
+            searched: false,
+            unlistedSite: unlistedFor(fromTool, callLocationId)
         };
     }
 
@@ -246,7 +260,11 @@ async function resolveCustomerVerdict({ call, dynamicVars, agentId, allowLookup,
             ? 'post_call_search'
             : 'post_call_search_unavailable';
 
-    return { verified: verified ?? null, locationId, source, searched: true };
+    return { verified: verified ?? null, locationId, source, searched: true, unlistedSite: unlistedFor(fromTool, locationId) };
 }
+
+// The unlisted-site details apply only when the job is going to the stand-in they came with.
+const unlistedFor = (fromTool, locationId) =>
+    (fromTool && fromTool.unlistedSite && fromTool.locationId === locationId) ? fromTool.unlistedSite : null;
 
 module.exports = { resolveCustomerVerdict, asLocationId };

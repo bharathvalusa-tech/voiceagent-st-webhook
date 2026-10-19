@@ -438,3 +438,41 @@ test('a spoken address that matches nothing never downgrades the account', async
     assert.strictEqual(verdict.verified, true);
     assert.strictEqual(verdict.locationId, '');
 });
+
+test('a company verified with its site not on file carries the real company and address to the job', async () => {
+    // /st-match-address confirmed the caller under Guard and Grace at an address that is
+    // none of its sites. The job goes to the stand-in site, so the description needs both.
+    const call = {
+        from_number: '+18018919380',
+        retell_llm_dynamic_variables: { st_customer_verified: 'false' },
+        transcript_with_tool_calls: [
+            { role: 'tool_call_result', content: JSON.stringify({ data: {
+                st_customer_verified: 'true', st_site_on_file: 'false',
+                st_location_id: '2776463860629889', st_company_id: '1491387824938433',
+                st_company_name: 'Guard and Grace', st_matched_address: '500 Main Street, Denver, CO 80202'
+            } }) }
+        ]
+    };
+    const verdict = await resolveCustomerVerdict({ call, dynamicVars: {}, agentId: AGENT, allowLookup: false });
+    assert.strictEqual(verdict.verified, true);
+    assert.strictEqual(verdict.locationId, '2776463860629889');
+    assert.deepStrictEqual(verdict.unlistedSite, {
+        companyId: '1491387824938433',
+        companyName: 'Guard and Grace',
+        address: '500 Main Street, Denver, CO 80202'
+    });
+});
+
+test('an ordinary verified site carries no unlisted-site details', async () => {
+    const call = {
+        from_number: '+18472202312',
+        transcript_with_tool_calls: [
+            { role: 'tool_call_result', content: JSON.stringify({ data: {
+                st_customer_verified: 'true', st_location_id: '1495451106949312', st_company_name: 'Guard and Grace'
+            } }) }
+        ]
+    };
+    const verdict = await resolveCustomerVerdict({ call, dynamicVars: {}, agentId: AGENT, allowLookup: false });
+    assert.strictEqual(verdict.locationId, '1495451106949312');
+    assert.strictEqual(verdict.unlistedSite, null);
+});

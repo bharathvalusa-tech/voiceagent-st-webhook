@@ -85,7 +85,7 @@ const logWithContext = (level, message, context = {}) => {
     }
 };
 
-const buildJobDescription = (issueDescription, callerName, callerPhone, currentNode) => {
+const buildJobDescription = (issueDescription, callerName, callerPhone, currentNode, unlistedSite) => {
     const name = (callerName || '').trim() || 'Unknown person';
     const phone = (callerPhone || '').trim() || null;
     const namePart = phone ? `${name} (${phone})` : name;
@@ -95,16 +95,24 @@ const buildJobDescription = (issueDescription, callerName, callerPhone, currentN
         !currentNode.toLowerCase().includes('after');
     const prefix = isOfficeHours ? '[OFFICE HOURS]' : '[AFTER HOURS]';
 
+    // Booked at the tenant's stand-in site: the job's own location says nothing about where
+    // the technician goes, so the real company and the caller's address lead the text.
+    const sitePart = unlistedSite
+        ? ` SITE NOT ON FILE - customer: ${unlistedSite.companyName || 'unknown'}`
+            + `${unlistedSite.companyId ? ` (company ${unlistedSite.companyId})` : ''}`
+            + `, service address given by caller: ${unlistedSite.address || 'not given'}.`
+        : '';
+
     const rawDescription = (issueDescription || '').trim();
     if (!rawDescription) {
-        return `${prefix}: ${namePart} reported an issue.`;
+        return `${prefix}:${sitePart} ${namePart} reported an issue.`;
     }
 
     const replaced = callerName
         ? rawDescription.replace(/\b(caller|customer)\b/gi, name)
         : rawDescription;
 
-    return `${prefix}: ${namePart} reported ${replaced}`;
+    return `${prefix}:${sitePart} ${namePart} reported ${replaced}`;
 };
 
 const normalizeBool = (value) => {
@@ -608,6 +616,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         // on. A location id recovered there is the one the caller was verified against, so it
         // must reach job creation rather than being re-derived from a transcribed address.
         let healedLocationId = '';
+        let unlistedSite = null;
         let extractedFields = loadExtractedFields(resolvedExtracted, resolvedAnalysis, resolvedDynamicVars);
 
         const needsRetellFetch =
@@ -730,6 +739,7 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
         });
 
         healedLocationId = verdict.locationId;
+        unlistedSite = verdict.unlistedSite || null;
 
         const existingCustomerFlag = verdict.verified ?? normalizeBool(
             resolvedDynamicVars?.customerVerified
@@ -1355,7 +1365,10 @@ async function processCallAnalyzed({ req, call, analysis, extracted, dynamicVars
 
         const callerPhoneForDescription = extractedFields.callerPhone || call?.from_number || call?.fromNumber || null;
         const currentNode = resolvedDynamicVars?.current_node || resolvedDynamicVars?.currentNode || null;
-        const jobDescription = buildJobDescription(issueDescription, callerName, callerPhoneForDescription, currentNode);
+        // Only when the job really is going to the stand-in the call confirmed.
+        const jobUnlistedSite = unlistedSite && String(selectedCandidate.locationId) === String(healedLocationId)
+            ? unlistedSite : null;
+        const jobDescription = buildJobDescription(issueDescription, callerName, callerPhoneForDescription, currentNode, jobUnlistedSite);
 
         const jobResult = await createJob(
             {
